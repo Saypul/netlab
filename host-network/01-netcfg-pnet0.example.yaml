@@ -1,0 +1,25 @@
+# NetLab: make the server's NIC a member of bridge pnet0 (EVE-NG style "Cloud pnet0").
+# The server's address moves from the NIC to pnet0; everything else stays the same.
+# Copy this file, replace every value marked CHANGE with the server's current settings
+# (see /etc/netplan/*.yaml and `ip link show <nic>`), and keep the original config as a backup.
+network:
+  version: 2
+  ethernets:
+    ens18:                           # CHANGE: the server's NIC
+      dhcp4: false
+      dhcp6: false
+  bridges:
+    pnet0:
+      interfaces: [ens18]            # CHANGE: same NIC as above
+      macaddress: "02:00:00:00:00:01"  # CHANGE: the NIC's MAC, so the hypervisor, ARP caches and DHCP see the same host
+      addresses:
+      - "192.0.2.10/24"              # CHANGE: the server's address
+      nameservers:
+        addresses:
+        - 1.1.1.1                    # CHANGE: the server's DNS
+      routes:
+      - to: "default"
+        via: "192.0.2.1"             # CHANGE: the server's gateway
+      parameters:
+        stp: false
+        forward-delay: 0

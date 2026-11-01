@@ -1,0 +1,9 @@
+# runtime state and secrets: users, JWT key, labs, node disks, QEMU images, DHCP leases
+data/
+.venv/
+__pycache__/
+*.pyc
+# netplan files generated for a specific server (IP, MAC, DNS); only the example is tracked
+host-network/*.yaml
+host-network/*.orig
+!host-network/*.example.yaml

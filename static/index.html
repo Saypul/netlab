@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetLab</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23fff' stroke='%23FF4F00' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wordmark">NetLab</div>
+  <div class="group">
+    <select id="labSelect" aria-label="Lab"></select>
+    <button data-act="newLab">New</button>
+    <button data-act="demoLab">Demo lab</button>
+    <button data-act="renameLab">Rename</button>
+    <button data-act="exportLab">Export</button>
+    <button data-act="importLab">Import</button>
+    <button data-act="deleteLab" class="danger">Delete</button>
+    <input type="file" id="importFile" accept=".json,application/json" hidden>
+  </div>
+  <div class="group right">
+    <span id="labCount" class="count"></span>
+    <button data-act="startLab" class="accent">Start all</button>
+    <button data-act="stopLab">Stop all</button>
+  </div>
+  <div class="group user">
+    <span id="userName" class="who"></span>
+    <button data-act="changePassword">Change password</button>
+    <button data-act="signOut">Sign out</button>
+  </div>
+</header>
+
+<section class="login" id="login" hidden>
+  <div class="login-mark">NetLab</div>
+  <form class="login-form" id="loginForm">
+    <h1>Sign in</h1>
+    <label class="stack">Username<input id="loginUser" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" required></label>
+    <label class="stack">Password<input id="loginPass" type="password" autocomplete="current-password" required></label>
+    <p class="login-error" id="loginError" role="alert"></p>
+    <button id="loginSubmit" class="accent">Sign in</button>
+  </form>
+</section>
+
+<main class="work">
+  <aside class="palette">
+    <h2>Device</h2>
+    <div id="paletteItems"></div>
+    <h2>Wire</h2>
+    <button id="connectBtn" class="tool" data-act="toggleConnect">
+      <svg viewBox="0 0 48 32"><use href="#ico-link"/></svg><span>Connect <kbd>L</kbd></span>
+    </button>
+    <p id="modeHint" class="hint"></p>
+  </aside>
+
+  <div class="stage-wrap">
+  <section class="stage" id="stage">
+    <svg id="canvas" width="2400" height="1600" viewBox="0 0 2400 1600" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <symbol id="ico-router" viewBox="0 0 48 48">
+          <circle cx="24" cy="24" r="21"/>
+          <path d="M11 17h12m0 0-4-4m4 4-4 4M37 31H25m0 0 4-4m-4 4 4 4M31 11v12m0 0-4-4m4 4 4-4M17 37V25m0 0-4 4m4-4 4 4"/>
+        </symbol>
+        <symbol id="ico-pc" viewBox="0 0 48 48">
+          <rect x="5" y="7" width="38" height="26"/>
+          <path d="M24 33v7M14 41h20"/>
+        </symbol>
+        <symbol id="ico-server" viewBox="0 0 48 48">
+          <rect x="10" y="4" width="28" height="40"/>
+          <path d="M10 15h28M10 26h28M16 9.5h6M16 20.5h6M16 31.5h6"/>
+        </symbol>
+        <symbol id="ico-switch" viewBox="0 0 48 48">
+          <rect x="3" y="12" width="42" height="24"/>
+          <path d="M10 20h26m0 0-4-4m4 4-4 4M38 28H12m0 0 4-4m-4 4 4 4"/>
+        </symbol>
+        <symbol id="ico-firewall" viewBox="0 0 48 48">
+          <rect x="5" y="9" width="38" height="30"/>
+          <path d="M5 19h38M5 29h38M17 9v10M31 9v10M11 19v10M24 19v10M37 19v10M17 29v10M31 29v10"/>
+        </symbol>
+        <symbol id="ico-cloud" viewBox="0 0 48 48">
+          <path d="M14 36h22a8 8 0 0 0 1-15.9A11 11 0 0 0 16 17a9.5 9.5 0 0 0-2 19z"/>
+        </symbol>
+        <symbol id="ico-link" viewBox="0 0 48 32">
+          <circle cx="8" cy="16" r="5"/><circle cx="40" cy="16" r="5"/><path d="M13 16h22"/>
+        </symbol>
+      </defs>
+      <g id="linkLayer"></g>
+      <line id="ghost" class="ghost" x1="0" y1="0" x2="0" y2="0" visibility="hidden"/>
+      <g id="nodeLayer"></g>
+    </svg>
+    <div id="empty" class="empty" hidden>
+      <h1>No lab open</h1>
+      <p>Create a lab, or open the demo: three FRR routers running OSPF and two PCs.</p>
+      <div class="row"><button data-act="newLab">New lab</button><button data-act="demoLab" class="accent">Demo lab</button></div>
+    </div>
+  </section>
+  <div class="zoom" id="zoomBar" role="group" aria-label="Zoom">
+    <button data-act="zoomOut" aria-label="Zoom out" title="Zoom out (-)"><svg viewBox="0 0 16 16"><path d="M3 8h10"/></svg></button>
+    <button data-act="zoomReset" id="zoomLevel" title="Reset to 100% (0)">100%</button>
+    <button data-act="zoomIn" aria-label="Zoom in" title="Zoom in (+)"><svg viewBox="0 0 16 16"><path d="M3 8h10M8 3v10"/></svg></button>
+    <button data-act="zoomFit" title="Fit the whole topology (F)">Fit</button>
+  </div>
+  </div>
+
+  <aside class="inspector" id="inspector"></aside>
+</main>
+
+<section class="dock" id="dock" hidden>
+  <div class="dock-grip" id="dockGrip"></div>
+  <nav class="tabs" id="tabs"></nav>
+  <div class="terms" id="terms"></div>
+</section>
+
+<div class="modal-back" id="modal" hidden>
+  <form class="modal" id="modalForm">
+    <h2 id="modalTitle"></h2>
+    <div id="modalBody"></div>
+    <div class="row end">
+      <button type="button" id="modalCancel">Cancel</button>
+      <button type="submit" id="modalOk" class="accent">OK</button>
+    </div>
+  </form>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

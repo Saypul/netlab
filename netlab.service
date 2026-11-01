@@ -1,0 +1,15 @@
+[Unit]
+Description=NetLab network simulator
+After=docker.service
+Requires=docker.service
+
+[Service]
+WorkingDirectory=/root/netlab
+ExecStart=/root/netlab/run.sh
+Environment=NETLAB_PORT=8765
+Restart=on-failure
+# only stop the web server; QEMU VMs it started keep running across restarts
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
