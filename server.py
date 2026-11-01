@@ -3,6 +3,7 @@ import asyncio
 import fcntl
 import json
 import os
+import shutil
 import struct
 import subprocess
 import termios
@@ -32,6 +33,15 @@ def auth(request: Request):
 @app.exception_handler(engine.LabError)
 def lab_error(_, exc):
     return JSONResponse({"detail": str(exc)}, status_code=400)
+
+
+@app.middleware("http")
+async def revalidate_ui(request, call_next):
+    # Browsers must recheck the UI files (ETag -> 304) so updates show up on a plain reload.
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.get("/")
@@ -78,6 +88,52 @@ def change_password(body: dict = Body(...), user: str = api):
 @app.get("/api/templates", dependencies=[api])
 def templates():
     return engine.templates()
+
+
+@app.get("/api/images", dependencies=[api])
+def images():
+    return engine.list_images()
+
+
+shutil.rmtree(engine.UPLOADS, ignore_errors=True)  # parts left by an upload cut short by a restart
+upload_lock = asyncio.Lock()
+
+
+@app.put("/api/images/{name}", dependencies=[api])
+async def upload_image(name: str, request: Request, filename: str, meta: str = "{}", disk_gb: int = 8):
+    """Raw request body = the disk file (streamed to disk, so multi-GB images are fine)."""
+    if upload_lock.locked():
+        raise HTTPException(409, "Another image is being uploaded. Wait for it to finish.")
+    async with upload_lock:
+        try:
+            meta = engine.clean_meta(json.loads(meta))
+        except json.JSONDecodeError:
+            raise HTTPException(400, "meta must be JSON")
+        if not 1 <= disk_gb <= 512:
+            raise HTTPException(400, "Disk size must be 1 to 512 GB.")
+        size = request.headers.get("content-length")
+        engine.check_new_image(name, filename, int(size) if size and size.isdigit() else None)
+        engine.UPLOADS.mkdir(parents=True, exist_ok=True)
+        tmp = engine.UPLOADS / f"{os.urandom(6).hex()}.part"
+        try:
+            written = 0
+            with open(tmp, "wb") as f:
+                async for chunk in request.stream():
+                    written += len(chunk)
+                    if written % (256 * 2**20) < len(chunk) and engine.disk_free() < engine.DISK_RESERVE:
+                        raise engine.LabError("the server disk filled up during the upload")
+                    await asyncio.to_thread(f.write, chunk)
+            if not written:
+                raise engine.LabError("the file is empty")
+            return await asyncio.to_thread(engine.install_image, tmp, name, meta, filename, disk_gb)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+@app.delete("/api/images/{name}", dependencies=[api])
+def delete_image(name: str):
+    engine.delete_image(name)
+    return {"ok": True}
 
 
 @app.get("/api/labs", dependencies=[api])

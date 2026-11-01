@@ -26,6 +26,27 @@ Variabel env: `NETLAB_HOST` (default 0.0.0.0), `NETLAB_PORT` (8765), `NETLAB_JWT
 ## Image QEMU (Cisco vIOS, MikroTik CHR, VyOS, dll.)
 
     apt install qemu-system-x86 qemu-utils
+
+**Upload dari browser:** klik **Upload VM image** di atas daftar Device. Bisa juga dengan mengklik perangkat
+abu-abu ("no image"), maka jenis perangkatnya langsung terpilih.
+- Pilih jenis perangkat, isi versinya, lalu pilih file disk. Image disimpan di `data/images/qemu/<kunci>-<versi>/`.
+- Untuk image di luar katalog, pilih **Other (custom image)** lalu isi nama, grup, RAM, jumlah interface,
+  network card, dan disk bus.
+- Jenis perangkat dan versi diisi otomatis dari nama file, misalnya `vyos-1.4.0-generic-amd64.iso` menjadi
+  VyOS 1.4.0. Cek dulu sebelum upload.
+- Format yang diterima: `.qcow2`, `.img`, `.raw`, `.vmdk` (satu file), `.vhd`, `.vhdx`, `.vdi`, dan `.iso`.
+  Selain qcow2 dan iso, file otomatis dikonversi ke qcow2. File `.zip` harus di-unzip dulu.
+- `.iso` (misalnya VyOS) disimpan sebagai `cdrom.iso` (read-only), ditambah disk kosong `disk.qcow2`
+  (default 8 GB, bisa diatur saat upload). VM boot dari disk dulu, dan kalau disk masih kosong, boot dari CD.
+  Jalankan installernya (VyOS: `install image`), maka boot berikutnya dari disk. **Wipe** mengosongkan disk node lagi.
+- Disk yang merujuk ke file lain (backing file atau external data file) ditolak.
+- Upload ditolak kalau sisa disk server kurang dari 2 GB (`NETLAB_DISK_RESERVE_MB`).
+- Hanya satu upload yang bisa berjalan dalam satu waktu.
+- Di dialog yang sama ada daftar image beserta tombol Delete. Image yang masih dipakai node di sebuah lab
+  tidak bisa dihapus.
+
+Cara manual dari server:
+
     mkdir -p data/images/qemu/vyos && cp vyos.qcow2 data/images/qemu/vyos/
 
 Opsional `data/images/qemu/<nama>/netlab.json`:

@@ -54,6 +54,7 @@ function modal({ title, body, ok = "OK", wide = false, focus }) {
     $("#modalBody").innerHTML = "";
     $("#modalBody").append(body);
     $("#modalOk").textContent = ok;
+    $("#modalForm").classList.toggle("wide", wide);
     $("#modal").hidden = false;
     (focus || body.querySelector("input,textarea"))?.focus();
     const done = (v) => { $("#modal").hidden = true; $("#modalForm").onsubmit = null; $("#modalCancel").onclick = null; resolve(v); };
@@ -135,6 +136,132 @@ async function changePassword() {
   if (nw.value !== rep.value) return toast("The new passwords do not match.");
   setSession(await api("POST", "/password", { current: cur.value, new: nw.value }));
   toast("Password changed.");
+}
+
+// ---------------------------------------------------------------- VM images
+
+const fmtSize = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 2 ** 20))} MB`);
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+|-+$/g, "");
+let upload = null;  // the upload in progress: {xhr, label}
+
+// guess the catalog device and version from a download's file name, e.g. vyos-1.4.0-generic-amd64.iso
+const FILE_HINTS = [[/vios.?l2/i, "viosl2"], [/vios/i, "vios"], [/c8000v/i, "c8000v"], [/(^|[^a-z])chr([^a-z]|$)|mikrotik|routeros/i, "mikrotik"],
+  [/vyos/i, "vyos"], [/openwrt/i, "openwrt"], [/cumulus/i, "cumulus"], [/opnsense/i, "opnsense"], [/pfsense/i, "pfsense"],
+  [/fgt|fortigate|fortios/i, "fortigate"], [/asav/i, "asav"], [/vsrx/i, "vsrx"], [/pa-vm|paloalto|pan-os/i, "paloalto"],
+  [/windows|win(7|10|11|20\d\d)/i, "windows"]];
+const guessDevice = (fname) => FILE_HINTS.find(([re]) => re.test(fname))?.[1];
+const guessVersion = (fname) => fname.match(/\d+(?:\.\d+)+/)?.[0] || "";
+
+async function manageImages(key) {
+  const info = await api("GET", "/images");
+  const opt = (value, text) => el("option", { value, text });
+  const field = (label, input) => el("label", { class: "stack" }, label, input);
+  const device = el("select", {}, ...state.tpl.qemu_catalog.map((c) => opt(c.key, `${c.label} (${GROUPS.find((g) => g[0] === c.category)?.[1] || c.category})`)),
+    opt("", "Other (custom image)"));
+  device.value = key ?? "mikrotik";
+  const version = el("input", { type: "text", placeholder: "for example 7.25" });
+  const label = el("input", { type: "text", placeholder: "for example Arista vEOS" });
+  const category = el("select", {}, ...GROUPS.filter(([c]) => c !== "cloud").map(([c, t]) => opt(c, t)));
+  const ram = el("input", { type: "number", min: 64, max: 65536, value: 512 });
+  const ifaces = el("input", { type: "number", min: 1, max: 24, value: 4 });
+  const nic = el("select", {}, opt("virtio-net-pci", "virtio"), opt("e1000", "e1000 (Cisco, MikroTik, Windows)"), opt("vmxnet3", "vmxnet3"));
+  const diskIf = el("select", {}, opt("virtio", "virtio"), opt("ide", "IDE"), opt("scsi", "SCSI"));
+  const file = el("input", { type: "file", accept: ".qcow2,.img,.raw,.vmdk,.vhd,.vhdx,.vdi,.iso" });
+  const diskGb = el("input", { type: "number", min: 1, max: 512, value: 8 });
+  const isoBox = el("div", { class: "grid2" }, field("Install disk (GB)", diskGb),
+    el("p", { class: "note", text: "An .iso boots from CD with this empty disk attached. Install it to the disk (VyOS: install image) and later boots start from the disk. Wipe a node to start over." }));
+  let deviceTouched = key !== undefined, autoVersion = "";
+  device.addEventListener("change", () => { deviceTouched = true; });
+  file.onchange = () => {
+    const f = file.files[0];
+    isoBox.hidden = !f || !/\.iso$/i.test(f.name);
+    if (!f) return;
+    const dev = guessDevice(f.name), ver = guessVersion(f.name);
+    if (!deviceTouched && dev) { device.value = dev; sync(); }
+    if (ver && (!version.value || version.value === autoVersion)) version.value = autoVersion = ver;
+  };
+  const custom = el("div", { class: "grid2" }, field("Name", label), field("Group", category), field("RAM (MB)", ram),
+    field("Interfaces", ifaces), field("Network card", nic), field("Disk bus", diskIf));
+  function sync() { custom.hidden = device.value !== ""; }
+  device.onchange = sync; sync(); isoBox.hidden = true;
+
+  const rows = info.images.map((m) => {
+    const del = el("button", { type: "button", class: "danger", text: "Delete", disabled: m.used_by.length > 0,
+      title: m.used_by.length ? "Used by " + m.used_by.join(", ") : "" });
+    del.onclick = async () => {
+      if (!confirm(`Delete image ${m.name}? This cannot be undone.`)) return;
+      await api("DELETE", "/images/" + encodeURIComponent(m.name));
+      del.closest("tr").remove();
+      await reloadTemplates();
+    };
+    return el("tr", {}, el("td", {}, el("b", { text: m.label }), el("div", { class: "note", text: m.name + (m.iso ? " · ISO" : "") })),
+      el("td", { class: "num", text: fmtSize(m.size) }),
+      el("td", { class: "note", text: m.used_by.length ? "in " + m.used_by.join(", ") : "not used" }), el("td", {}, del));
+  });
+  const body = el("div", { class: "images" },
+    el("h3", { text: "Upload" }),
+    el("p", { text: `Accepts .qcow2, .img, .raw, .vmdk, .vhd, .vhdx, .vdi and .iso. Disks that are not qcow2 are converted to qcow2. Unzip .zip downloads first. Device and version are filled in from the file name; check them before uploading. Server disk: ${fmtSize(info.free)} free, ${fmtSize(info.reserve)} kept in reserve.` }),
+    field("Disk file", file), el("div", { class: "grid2" }, field("Device", device), field("Version", version)), isoBox, custom,
+    el("h3", { text: "Images on the server" }),
+    rows.length ? el("table", { class: "imgs" }, ...rows) : el("p", { text: "No images yet." }));
+  if (upload) file.disabled = true;
+
+  while (await modal({ title: "VM images", body, ok: "Upload", wide: true, focus: file })) {
+    const err = (m) => { toast(m); return null; };
+    const f = file.files[0];
+    const ver = slug(version.value.trim());
+    const isCustom = device.value === "";
+    let name, meta = {};
+    if (upload) { err("An upload is already running."); continue; }
+    if (!f) { err("Choose a disk file."); continue; }
+    if (isCustom) {
+      if (!label.value.trim()) { err("Give the custom image a name."); continue; }
+      name = slug(label.value) + (ver ? "-" + ver : "");
+      meta = { label: (label.value.trim() + " " + version.value.trim()).trim(), category: category.value,
+        ram: +ram.value, ifaces: +ifaces.value, nic: nic.value, disk_if: diskIf.value };
+    } else {
+      if (!ver) { err("Enter the version, for example 7.25."); continue; }
+      name = `${device.value}-${ver}`;
+    }
+    if (info.images.some((m) => m.name === name)) { err(`Image ${name} already exists. Delete it first, or use another version.`); continue; }
+    if (f.size > info.free - info.reserve) { err(`Not enough disk space for ${fmtSize(f.size)}.`); continue; }
+    startUpload(name, f, meta, +diskGb.value || 8);
+    return;
+  }
+}
+
+function startUpload(name, f, meta, diskGb) {
+  const box = $("#upload"), bar = box.querySelector("progress"), text = box.querySelector("span");
+  const xhr = new XMLHttpRequest();
+  upload = { xhr };
+  const done = (msg) => { upload = null; box.hidden = true; if (msg) toast(msg); };
+  xhr.open("PUT", `/api/images/${encodeURIComponent(name)}?filename=${encodeURIComponent(f.name)}&meta=${encodeURIComponent(JSON.stringify(meta))}&disk_gb=${diskGb}`);
+  xhr.setRequestHeader("authorization", "Bearer " + state.token);
+  xhr.setRequestHeader("content-type", "application/octet-stream");
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    bar.value = e.loaded / e.total;
+    text.textContent = e.loaded < e.total ? `Uploading ${name}: ${fmtSize(e.loaded)} of ${fmtSize(e.total)}`
+      : `Checking and converting ${name}…`;
+  };
+  xhr.onload = async () => {
+    let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
+    if (xhr.status === 401) return done("Your session expired during the upload. Sign in and upload again.");
+    if (xhr.status >= 300) return done("Upload failed: " + (j.detail || xhr.statusText));
+    done(`${j.label || name} is ready. Drag it from the Device list onto the lab.`);
+    await reloadTemplates();
+  };
+  xhr.onerror = () => done("Upload failed: the connection to the server was lost.");
+  xhr.onabort = () => done("Upload cancelled.");
+  bar.value = 0;
+  text.textContent = `Uploading ${name}…`;
+  box.hidden = false;
+  xhr.send(f);
+}
+
+async function reloadTemplates() {
+  state.tpl = await api("GET", "/templates");
+  renderPalette();
 }
 
 // ---------------------------------------------------------------- labs
@@ -236,6 +363,8 @@ const actions = {
   },
   changePassword,
   signOut,
+  manageImages() { manageImages(); },
+  cancelUpload() { if (upload && confirm("Cancel the upload?")) upload.xhr.abort(); },
   toggleConnect() { setMode(state.mode?.connect ? null : { connect: true, from: null }); },
 };
 
@@ -284,9 +413,8 @@ function devices() {
   for (const c of state.tpl.qemu_catalog) {
     if (have.has(c.key)) continue;
     const ram = c.ram >= 1024 ? `${+(c.ram / 1024).toFixed(1)} GB` : `${c.ram} MB`;
-    out.push({ category: knownCategory(c.category), label: c.label, missing: {
-      sub: `no image · ${ram} RAM`, title: `No image yet. Needs ${ram} RAM.`,
-      help: `${c.label} has no image yet. Put its .qcow2 in data/images/qemu/${c.key}-<version>/ on the server, then reload this page.` } });
+    out.push({ category: knownCategory(c.category), label: c.label, upload: c.key, missing: {
+      sub: `no image · ${ram} RAM`, title: `No image yet. Needs ${ram} RAM. Click to upload one.` } });
   }
   return out;
 }
@@ -314,7 +442,7 @@ function renderPalette() {
         const b = el("button", { class: "tool missing", title: d.missing.title });
         b.innerHTML = `<svg viewBox="0 0 48 48"><use href="#${CATEGORY_ICON[cat]}"/></svg>`;
         b.append(el("span", {}, d.label, el("small", { text: d.missing.sub })));
-        b.onclick = () => toast(d.missing.help);
+        b.onclick = () => (d.upload ? manageImages(d.upload) : toast(d.missing.help));
         box.append(b);
         continue;
       }
@@ -453,7 +581,7 @@ function render() {
     for (const [p, q, end] of [[a, b, l.a], [b, a, l.b]]) {  // port status dot just outside the icon
       if (!end.node) continue;
       const d = Math.hypot(q.x - p.x, q.y - p.y) || 1;
-      g.append(svg("circle", { class: "dot", r: 3.5, cx: p.x + (q.x - p.x) * 31 / d, cy: p.y + (q.y - p.y) * 31 / d }));
+      g.append(svg("circle", { class: "dot", r: 4.5, cx: p.x + (q.x - p.x) * 31 / d, cy: p.y + (q.y - p.y) * 31 / d }));
     }
     const hit = svg("line", { class: "hit", x1: a.x, y1: a.y, x2: b.x, y2: b.y });
     hit.addEventListener("pointerdown", (e) => { e.stopPropagation(); select("link", l.id); });
@@ -576,6 +704,57 @@ $("#stage").addEventListener("wheel", (e) => {
   setZoom(state.zoom * Math.exp(-e.deltaY * 0.002), { x: e.clientX, y: e.clientY });
 }, { passive: false });
 
+// ---------------------------------------------------------------- click menu
+
+function closeMenu() { $("#ctxMenu").hidden = true; }
+
+// opens beside the device, never under the pointer, so the second click of a double-click lands on the
+// device (console) and not on a menu item; clicks in the first 400 ms are ignored for the same reason
+function showMenu(kind, o) {
+  const menu = $("#ctxMenu"), opened = performance.now();
+  menu.innerHTML = "";
+  const item = (label, fn, cls) => menu.append(el("button", { type: "button", role: "menuitem", text: label, class: cls,
+    onclick: () => { if (performance.now() - opened < 400) return; closeMenu(); fn(); } }));
+  const rename = async () => {
+    const name = await ask(`Rename ${o.name}`, o.name);
+    if (!name || name === o.name) return;
+    await api("PATCH", `/labs/${state.lab.id}/${kind === "node" ? "nodes" : "networks"}/${o.id}`, { name });
+    await reloadLab();
+  };
+  const connect = () => { setMode({ connect: true }); state.mode.from = kind === "node" ? { node: o.id } : { network: o.id }; render(); };
+  menu.append(el("div", { class: "menu-title", text: o.name }));
+  if (kind === "node") {
+    const acts = nodeActions(o), del = acts.pop();
+    for (const [label, fn, cls] of acts) item(label, fn, cls);
+    item("Connect to…", connect);
+    item("Rename", rename);
+    item(del[0], del[1], del[2]);
+  } else {
+    item("Connect to…", connect);
+    item("Rename", rename);
+    item("Delete", () => { select(kind, o.id); deleteSelection(); }, "danger");
+  }
+  menu.hidden = false;
+  const r = menu.getBoundingClientRect();
+  const icon = document.querySelector(`#nodeLayer .node[data-kind="${kind}"][data-id="${o.id}"]`).getBoundingClientRect();
+  const right = icon.right + 12, left = icon.left - 12 - r.width;
+  menu.style.left = (right + r.width <= innerWidth - 8 || left < 8 ? Math.min(right, innerWidth - r.width - 8) : left) + "px";
+  menu.style.top = Math.max(8, Math.min(icon.top - 4, innerHeight - r.height - 8)) + "px";
+  menu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+}
+
+document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#ctxMenu")) closeMenu(); }, true);
+window.addEventListener("resize", closeMenu);
+$("#stage").addEventListener("scroll", closeMenu);
+$("#canvas").addEventListener("contextmenu", (e) => {
+  const t = e.target.closest(".node");
+  if (!t) return;
+  e.preventDefault();
+  const kind = t.dataset.kind, o = (kind === "node" ? state.lab.nodes : state.lab.networks)[t.dataset.id];
+  select(kind, o.id);
+  showMenu(kind, o);
+});
+
 let drag = null, lastDown = { id: null, t: 0 };
 function onThingDown(e, kind, o) {
   e.stopPropagation();
@@ -584,6 +763,7 @@ function onThingDown(e, kind, o) {
   const key = kind + o.id, now = performance.now();
   if (kind === "node" && lastDown.id === key && now - lastDown.t < 400) {
     lastDown = { id: null, t: 0 };
+    closeMenu();
     return openConsole(o);
   }
   lastDown = { id: key, t: now };
@@ -634,6 +814,8 @@ $("#canvas").addEventListener("pointerup", async (e) => {
   if (!drag) return;
   const { kind, o, moved } = drag;
   drag = null;
+  // a plain left click (no drag) opens the device menu at the pointer
+  if (!moved && e.button === 0) return showMenu(kind, o);
   if (moved) await api("PATCH", `/labs/${state.lab.id}/${kind === "node" ? "nodes" : "networks"}/${o.id}`, { x: o.x, y: o.y });
 });
 
@@ -759,7 +941,7 @@ function renderLabInfo(box) {
     el("ul", { class: "help" },
       el("li", { text: "Drag a device from the Device list onto the lab sheet. Or click it, then click the sheet; hold Shift to place several." }),
       el("li", { text: "Connect: drag the orange plug on a device onto another device, then pick the port on each side. Or press L and click two devices." }),
-      el("li", { text: "Double-click a running node to open its console." }),
+      el("li", { text: "Click a device (or right-click it) for its menu: start, stop, console, connect, rename, wipe, delete. Double-click a running node to open its console." }),
       el("li", { text: "Delete removes the selection. Esc cancels the current tool." }),
       el("li", { text: "Zoom: Ctrl + scroll or pinch, the buttons at the bottom right, or + and -. 0 resets to 100%, F fits the whole topology." }),
       el("li", { text: "Router configs persist when you run write memory in vtysh." })),
@@ -771,13 +953,29 @@ function linksOf(nodeId) {
     l.a.node === nodeId ? [[l.a.iface, l.b]] : l.b.node === nodeId ? [[l.b.iface, l.a]] : []);
 }
 
+// node actions shared by the inspector and the click menu: [label, fn, class]
+function nodeActions(n) {
+  const tpl = state.tpl.templates[n.template];
+  const running = state.status[n.id] === "running";
+  const path = `/labs/${state.lab.id}/nodes/${n.id}`;
+  const run = (a) => async () => { await api("POST", `${path}/${a}`); await reloadLab(); };
+  const out = [running ? ["Stop", run("stop")] : ["Start", run("start"), "accent"]];
+  if (running) for (const c of tpl.consoles) out.push([`Console: ${c}`, () => openConsole(n, c)]);
+  if (n.template !== "qemu") out.push(["Startup config", () => editConfig(n)]);
+  out.push(["Wipe", async () => {
+    const ok = await modal({ title: `Wipe ${n.name}?`, ok: "Wipe",
+      body: el("p", { text: "Stops the node and deletes its saved config and disk changes. It boots with its initial config next time." }) });
+    if (ok) await run("wipe")();
+  }]);
+  out.push(["Delete", () => { select("node", n.id); deleteSelection(); }, "danger"]);
+  return out;
+}
+
 function renderNode(box, n) {
   const lab = state.lab, tpl = state.tpl.templates[n.template];
   const running = state.status[n.id] === "running";
   const path = `/labs/${lab.id}/nodes/${n.id}`;
   const patch = async (f) => { try { await api("PATCH", path, f); } finally { await reloadLab(); } };
-  const act = (label, fn, cls) => el("button", { text: label, class: cls, onclick: fn });
-  const run = (a) => async () => { await api("POST", `${path}/${a}`); await reloadLab(); };
 
   box.append(
     el("h2", { text: `Node ${String(n.id).padStart(2, "0")}` }),
@@ -786,15 +984,7 @@ function renderNode(box, n) {
       el("span", { class: "state" + (running ? " running" : ""), text: running ? "running" : "stopped" })),
   );
   const acts = el("div", { class: "actions" });
-  acts.append(running ? act("Stop", run("stop")) : act("Start", run("start"), "accent"));
-  if (running) for (const c of tpl.consoles) acts.append(act(`Console: ${c}`, () => openConsole(n, c)));
-  if (n.template !== "qemu") acts.append(act("Startup config", () => editConfig(n)));
-  acts.append(act("Wipe", async () => {
-    const ok = await modal({ title: `Wipe ${n.name}?`, ok: "Wipe",
-      body: el("p", { text: "Stops the node and deletes its saved config and disk changes. It boots with its initial config next time." }) });
-    if (ok) await run("wipe")();
-  }));
-  acts.append(act("Delete", () => deleteSelection(), "danger"));
+  for (const [label, fn, cls] of nodeActions(n)) acts.append(el("button", { text: label, class: cls, onclick: fn }));
   box.append(acts);
 
   box.append(el("h2", { text: "Settings" }),
@@ -846,7 +1036,7 @@ function renderLink(box, l) {
     el("h2", { text: "Link" }),
     el("p", { class: "big", text: endName(l.a) }),
     el("p", { class: "sub" }, "to " + endName(l.b) + " · ",
-      el("span", { class: "state" + (state.linkStatus[l.id] === "up" ? " running" : ""), text: state.linkStatus[l.id] === "up" ? "link up" : "link down" })),
+      el("span", { class: "state " + (state.linkStatus[l.id] === "up" ? "up" : "down"), text: state.linkStatus[l.id] === "up" ? "link up" : "link down" })),
     el("p", { class: "note", text: "Links can be added and removed while nodes are running." }),
     el("div", { class: "actions" }, el("button", { text: "Delete link", class: "danger", onclick: () => deleteSelection() })),
   );
@@ -882,7 +1072,7 @@ async function deleteSelection() {
 
 document.addEventListener("keydown", (e) => {
   if (e.target.closest("input,textarea,select") || !$("#modal").hidden || e.target.closest(".xterm")) return;
-  if (e.key === "Escape") { setMode(null); select(null); }
+  if (e.key === "Escape") { closeMenu(); setMode(null); select(null); }
   else if (e.key === "Delete" || e.key === "Backspace") deleteSelection();
   else if (e.key.toLowerCase() === "l") actions.toggleConnect();
   else if (e.ctrlKey || e.metaKey || e.altKey) return;

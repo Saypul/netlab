@@ -6,6 +6,8 @@
   --rule: #D9D9DC;
   --grid: #ECECEE;
   --accent: #FF4F00;
+  --up: #16A34A;
+  --down: #DC2626;
   --sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --dock-h: 300px;
@@ -96,12 +98,12 @@ label.check input { margin: 0; accent-color: var(--accent); }
 .link .hit { stroke: transparent; stroke-width: 14; cursor: pointer; }
 .link.down .wire { stroke: var(--mute); stroke-dasharray: 5 5; }
 .link.sel .wire { stroke: var(--accent); stroke-width: 3; }
-.link .flow, .link .pulse { pointer-events: none; stroke: var(--accent); stroke-linecap: round; }
+.link .flow, .link .pulse { pointer-events: none; stroke: var(--up); stroke-linecap: round; }
 .link .flow { stroke-width: 2.5; stroke-dasharray: 0.1 16; animation: link-flow 1.2s linear infinite; }
 .link .pulse { stroke-width: 5; stroke-dasharray: 0.12 1.5; animation: link-pulse .9s ease-in-out both; }
 .link.fresh .wire { stroke-dasharray: 1; animation: link-draw .7s ease-out both; }
-.link .dot { fill: var(--white); stroke: var(--mute); stroke-width: 1.5; pointer-events: none; }
-.link.up .dot { fill: var(--accent); stroke: var(--accent); }
+.link .dot { fill: var(--down); stroke: var(--white); stroke-width: 1.5; pointer-events: none; }
+.link.up .dot { fill: var(--up); }
 @keyframes link-flow { to { stroke-dashoffset: -16.1; } }
 @keyframes link-pulse { from { stroke-dashoffset: 0.12; opacity: 1; } 85% { opacity: 1; } to { stroke-dashoffset: -1; opacity: 0; } }
 @keyframes link-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
@@ -118,6 +120,7 @@ label.check input { margin: 0; accent-color: var(--accent); }
 .node { cursor: grab; }
 .node .icon { fill: var(--white); stroke: var(--ink); stroke-width: 2; }
 .node.running .icon { stroke: var(--accent); }
+.node.running .icon, .tool.on svg { --router-side: url(#g-router-side-on); }
 .node .pad { fill: var(--white); }
 .node .label { font-size: 12px; font-weight: 700; fill: var(--ink); text-anchor: middle; paint-order: stroke; stroke: var(--white); stroke-width: 4px; }
 .node .folio {
@@ -152,6 +155,8 @@ label.stack select { display: block; width: 100%; margin-top: 4px; color: var(--
 .sub { color: var(--mute); margin: 0 0 16px; }
 .state { display: inline-block; font-weight: 700; }
 .state.running { color: var(--accent); }
+.state.up { color: var(--up); }
+.state.down { color: var(--down); }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 td { border-top: 1px solid var(--rule); padding: 5px 0; vertical-align: top; }
@@ -211,6 +216,23 @@ label.stack input { display: block; width: 100%; margin-top: 4px; color: var(--i
 .modal textarea { width: 100%; height: 50vh; font: 12px/1.5 var(--mono); resize: vertical; }
 .modal input { width: 100%; }
 .modal p { color: var(--mute); margin: 0 0 12px; }
+.modal.wide { width: min(760px, calc(100vw - 32px)); }
+#modalBody { max-height: calc(100vh - 160px); overflow-y: auto; }
+.modal h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin: 18px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--ink); }
+.modal h3:first-child { margin-top: 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.grid2[hidden] { display: none; }
+label.stack input[type=file] { padding: 4px 0; border: none; }
+table.imgs td { padding: 8px 8px 8px 0; vertical-align: middle; }
+table.imgs td:first-child { width: auto; font: inherit; }
+table.imgs td.num { white-space: nowrap; }
+table.imgs td:last-child { text-align: right; padding-right: 0; }
+table.imgs .note { margin: 2px 0 0; font-family: var(--mono); }
+.wide-btn { width: 100%; margin-bottom: 12px; }
+.upload { border: 1px solid var(--ink); padding: 8px; margin-bottom: 12px; font-size: 12px; }
+.upload span { display: block; margin-bottom: 6px; overflow-wrap: anywhere; }
+.upload progress { width: 100%; height: 6px; accent-color: var(--accent); display: block; margin-bottom: 6px; }
+@media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
 .modal .row { margin-top: 14px; }
 .toast {
   position: fixed; left: 16px; bottom: 16px; z-index: 30; max-width: 480px;
@@ -229,3 +251,12 @@ label.stack input { display: block; width: 100%; margin-top: 4px; color: var(--i
   .group.user { padding-left: 0; border-left: none; }
   .login { grid-template-columns: 1fr; align-content: end; padding: 24px 16px; gap: 32px; }
 }
+
+/* device click menu */
+.menu { position: fixed; z-index: 15; min-width: 180px; background: var(--white); border: 1px solid var(--ink); padding: 4px 0; }
+.menu .menu-title { font-weight: 700; padding: 6px 12px 8px; border-bottom: 1px solid var(--rule); margin-bottom: 4px; }
+.menu button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 7px 12px; }
+.menu button:hover, .menu button:focus-visible { background: var(--paper); outline: none; }
+.menu button.accent { color: var(--accent); font-weight: 700; background: none; }
+.menu button.accent:hover { background: var(--paper); color: var(--accent); }
+.menu button.danger { color: var(--down); border-top: 1px solid var(--rule); margin-top: 4px; }

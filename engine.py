@@ -243,6 +243,153 @@ def qemu_images():
     return [image_meta(d.name) for d in sorted(IMAGES.iterdir()) if d.is_dir() and any(d.glob("*.qcow2"))]
 
 
+# ---------------------------------------------------------------- image upload
+
+UPLOADS = DATA / "uploads"  # staging area, same filesystem as IMAGES so the final move is a rename
+DISK_RESERVE = int(os.environ.get("NETLAB_DISK_RESERVE_MB", "2048")) * 2**20
+IMAGE_EXTS = (".qcow2", ".img", ".raw", ".vmdk", ".vhd", ".vhdx", ".vdi", ".iso")
+IMAGE_FORMATS = {"qcow2", "raw", "vmdk", "vpc", "vhdx", "vdi"}
+# settings a custom upload may set in netlab.json (never "extra": those are raw qemu arguments)
+IMAGE_META = {"label": str, "category": str, "ram": int, "cpu": int, "ifaces": int, "nic": str,
+              "disk_if": str, "iface_prefix": str, "iface_start": int}
+NICS = {"virtio-net-pci", "e1000", "e1000e", "vmxnet3", "rtl8139"}
+DISK_IFS = {"virtio", "ide", "scsi"}
+CATEGORIES = {"router", "switch", "firewall", "host", "other"}
+
+
+def disk_free():
+    return shutil.disk_usage(IMAGES).free
+
+
+def _image_users(name):
+    out = []
+    for p in sorted(LABS.glob("*.json")):
+        lab = json.loads(p.read_text())
+        if any(n.get("image") == name for n in lab["nodes"].values()):
+            out.append(lab["name"])
+    return out
+
+
+def list_images():
+    out = []
+    for m in qemu_images():
+        d = IMAGES / m["name"]
+        size = sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+        out.append({"name": m["name"], "label": m["label"], "category": m["category"], "ram": m["ram"],
+                    "size": size, "iso": (d / "cdrom.iso").exists(), "used_by": _image_users(m["name"])})
+    return {"images": out, "free": disk_free(), "reserve": DISK_RESERVE}
+
+
+def check_new_image(name, filename, size):
+    """Validate an upload before any bytes are stored."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", name or ""):
+        raise LabError("image name: lowercase letters, digits, '.', '_' and '-' only")
+    if (IMAGES / name).exists():
+        raise LabError(f"image {name} already exists; delete it first")
+    if not str(filename).lower().endswith(IMAGE_EXTS):
+        raise LabError("disk file must be one of " + ", ".join(IMAGE_EXTS))
+    if size is not None and size > disk_free() - DISK_RESERVE:
+        raise LabError(f"not enough disk space: the file is {size // 2**20} MB, the server has "
+                       f"{disk_free() // 2**20} MB free and keeps {DISK_RESERVE // 2**20} MB in reserve")
+
+
+def clean_meta(meta):
+    out = {}
+    for k, v in (meta or {}).items():
+        if k not in IMAGE_META or v in ("", None):
+            continue
+        try:
+            v = IMAGE_META[k](v)
+        except (TypeError, ValueError):
+            raise LabError(f"invalid {k}")
+        out[k] = v
+    if "label" in out:
+        out["label"] = out["label"].strip()[:60]
+    if out.get("category", "other") not in CATEGORIES:
+        raise LabError("invalid category")
+    if out.get("nic", "virtio-net-pci") not in NICS:
+        raise LabError("invalid nic")
+    if out.get("disk_if", "virtio") not in DISK_IFS:
+        raise LabError("invalid disk_if")
+    if not 64 <= out.get("ram", 64) <= 65536 or not 1 <= out.get("cpu", 1) <= 16 \
+            or not 1 <= out.get("ifaces", 1) <= 24 or not 0 <= out.get("iface_start", 0) <= 9:
+        raise LabError("ram, cpu, ifaces or iface_start out of range")
+    if not re.fullmatch(r"[A-Za-z/-]{0,24}", out.get("iface_prefix", "")):
+        raise LabError("invalid iface_prefix")
+    return out
+
+
+def _disk_info(path):
+    r = sh(["qemu-img", "info", "--output=json", str(path)], check=False)
+    if r.returncode:
+        raise LabError("not a disk image qemu can read")
+    info = json.loads(r.stdout)
+    fmt = info.get("format")
+    if fmt not in IMAGE_FORMATS:
+        raise LabError(f"unsupported disk format {fmt}")
+    # a disk that points at other files could read host files into the VM
+    if info.get("backing-filename") or info.get("format-specific", {}).get("data", {}).get("data-file"):
+        raise LabError("disk images with a backing or external data file are not accepted")
+    if fmt == "vmdk":
+        with open(path, "rb") as f:
+            if f.read(4) != b"KDMV":
+                raise LabError("only single-file (sparse) VMDK disks are accepted")
+    return fmt
+
+
+def _is_iso(path):
+    with open(path, "rb") as f:
+        f.seek(0x8001)
+        return f.read(5) == b"CD001"  # ISO 9660 volume descriptor
+
+
+def install_image(tmp, name, meta, filename="", disk_gb=8):
+    """Turn an uploaded disk into data/images/qemu/<name>/disk.qcow2. Consumes tmp.
+
+    An .iso becomes cdrom.iso (read-only installer/live CD) next to an empty disk.qcow2 of disk_gb,
+    like EVE-NG: the VM boots the disk first and falls back to the CD while the disk is blank.
+    """
+    stage = UPLOADS / ("dir-" + uuid.uuid4().hex[:8])
+    try:
+        iso = str(filename).lower().endswith(".iso")
+        if iso and not _is_iso(tmp):
+            raise LabError("the .iso file is not an ISO 9660 image")
+        if not 1 <= int(disk_gb) <= 512:
+            raise LabError("disk size must be 1 to 512 GB")
+        fmt = "iso" if iso else _disk_info(tmp)
+        stage.mkdir(parents=True)
+        disk = stage / "disk.qcow2"
+        if fmt == "iso":
+            tmp.rename(stage / "cdrom.iso")
+            sh(["qemu-img", "create", "-f", "qcow2", str(disk), f"{int(disk_gb)}G"])
+        elif fmt == "qcow2":
+            tmp.rename(disk)
+        else:
+            r = sh(["qemu-img", "convert", "-f", fmt, "-O", "qcow2", str(tmp), str(disk)], check=False)
+            if r.returncode:
+                raise LabError("converting to qcow2 failed: " + (r.stderr or "").strip()[-300:])
+        if meta:
+            (stage / "netlab.json").write_text(json.dumps(meta, indent=1))
+        with _file_lock:
+            if (IMAGES / name).exists():
+                raise LabError(f"image {name} already exists")
+            stage.rename(IMAGES / name)
+        return image_meta(name)
+    finally:
+        tmp.unlink(missing_ok=True)
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def delete_image(name):
+    # leading [a-z0-9] rules out "." and ".." (which would point at IMAGES or its parent)
+    if not re.fullmatch(r"[A-Za-z0-9][\w.-]*", name) or not (IMAGES / name).is_dir():
+        raise LabError("no such image")
+    users = _image_users(name)
+    if users:
+        raise LabError("image is used by lab " + ", ".join(users) + "; delete those nodes first")
+    shutil.rmtree(IMAGES / name)
+
+
 def templates():
     catalog = [{"key": k, "label": v["label"], "category": v["category"], "ram": v["ram"]}
                for k, v in QEMU_CATALOG.items()]
@@ -277,7 +424,7 @@ def add_node(lab_id, spec):
         defaults, image = tpl, None
         if tpl["kind"] == "qemu":
             image = spec.get("image") or ""
-            if not re.fullmatch(r"[\w.-]+", image) or not (IMAGES / image).is_dir():
+            if not re.fullmatch(r"[A-Za-z0-9][\w.-]*", image) or not (IMAGES / image).is_dir():
                 raise LabError("pick a QEMU image (data/images/qemu/<name>/)")
             defaults = image_meta(image)
         nid = _next_id(lab)
@@ -818,6 +965,9 @@ def _qemu_start(lab, node):
         if not ov.exists():
             sh(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(base), str(ov)])
         drives += ["-drive", f"file={ov},if={meta.get('disk_if', 'virtio')},index={i}"]
+    iso = img_dir / "cdrom.iso"
+    if iso.exists():  # shared read-only; boot the disk, fall back to the CD while the disk is blank
+        drives += ["-drive", f"file={iso},format=raw,media=cdrom,readonly=on,if=ide,index=2", "-boot", "order=cd"]
     port = _free_port()
     nic = meta.get("nic", "virtio-net-pci")
     args = [qemu, "-name", container_name(lab_id, nid), "-m", str(node.get("ram", 1024)),
