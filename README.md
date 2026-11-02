@@ -4,14 +4,52 @@ Simulator jaringan berbasis web, mirip EVE-NG/PNETLab. Router (FRRouting) dan PC
 berjalan sebagai container Docker. VM QEMU dari image `.qcow2` milikmu sendiri juga bisa dijalankan.
 Setiap kabel atau switch adalah Linux bridge, sehingga link bisa ditambah atau dicabut saat lab berjalan.
 
-## Menjalankan
+## Instalasi di server (Ubuntu / Debian)
 
-    sudo ./run.sh                     # http://<server>:8765/
-    cat data/initial_password         # login pertama: user admin + password acak
+Repo ini private, jadi installer butuh token GitHub yang punya akses baca ke `Saypul/netlab`.
+Buat fine-grained token di GitHub → Settings → Developer settings, dengan izin *Contents: Read-only* untuk repo ini.
 
-Sebagai service: `cp netlab.service /etc/systemd/system/ && systemctl enable --now netlab`.
+    TOKEN=github_pat_xxx
+    curl -fsSL -H "Authorization: token $TOKEN" \
+      https://raw.githubusercontent.com/Saypul/netlab/main/install.sh | sudo NETLAB_GITHUB_TOKEN=$TOKEN bash
+
+Installer melakukan hal berikut:
+- memasang Docker, QEMU, dnsmasq, dan Python;
+- mengambil rilis terbaru ke `/opt/netlab`;
+- membuat service `netlab` dan perintah `netlab`;
+- menampilkan alamat web dan password awal user `admin`.
+
+Variabel yang bisa diatur: `NETLAB_DIR`, `NETLAB_PORT` (default 8765), dan `NETLAB_REF` (tag/branch tertentu).
+
+Perintah di server:
+
+    netlab version | status | restart | logs
+    netlab update --check     # cek rilis baru di GitHub
+    netlab update             # update (minta konfirmasi; -y untuk langsung)
+    netlab token              # ganti token GitHub
+    netlab user list | passwd <user> | deluser <user>
+
+Menjalankan manual tanpa installer: `sudo ./run.sh`, lalu buka `http://<server>:8765/`.
+Password pertama ada di `data/initial_password`.
 
 Variabel env: `NETLAB_HOST` (default 0.0.0.0), `NETLAB_PORT` (8765), `NETLAB_JWT_TTL` (detik, default 43200), `NETLAB_DATA`.
+
+## Update online
+
+- NetLab mengecek rilis baru di GitHub setiap 6 jam. Kalau ada, tombol **Update to x.y.z** muncul di kanan atas
+  beserta catatan rilis dan daftar perubahannya. Dari CLI: `netlab update`.
+- Proses update: ambil rilis baru, pasang dependency Python, restart service, lalu tunggu NetLab menyala.
+  Kalau versi baru gagal menyala dalam 60 detik, NetLab otomatis kembali ke versi sebelumnya.
+- Lab yang sedang jalan tetap jalan. Folder `data/` (lab, image VM, user, login AI, token) tidak disentuh.
+- Update ditolak kalau ada perubahan kode lokal yang belum di-commit di folder instalasi.
+- Status dan log update ada di `data/update.json` dan `data/update.log`.
+
+Membuat rilis (dari mesin developer):
+
+    ./release.sh 1.1.0 "Console VM dibagi dengan asisten AI"
+
+Skrip ini menulis `VERSION`, commit, membuat tag `v1.1.0` (pesannya jadi catatan rilis), lalu push setelah
+dikonfirmasi. Semua server NetLab kemudian melihat update tersebut.
 
 ## Cara pakai
 
@@ -57,7 +95,8 @@ Opsional `data/images/qemu/<nama>/netlab.json`:
 `category` menentukan grup image di daftar **Device**: `router`, `switch`, `firewall`, atau `host`.
 Tanpa category, image masuk grup Other. Image Cisco memakai `"nic": "e1000"`. Setiap node mendapat
 overlay copy-on-write, jadi image dasarnya tidak ikut berubah. Konsolnya memakai serial
-(telnet ke 127.0.0.1, dijembatani ke browser).
+(telnet ke 127.0.0.1, dijembatani ke browser). Satu koneksi per VM dibagi ke semua tab yang membukanya, dan tab baru
+langsung menampilkan output terakhir.
 
 Contoh MikroTik CHR (sudah terpasang di `data/images/qemu/mikrotik-chr-7.25/`):
 
@@ -121,6 +160,35 @@ Kalau server tidak bisa diakses, buka console lalu jalankan (dari folder NetLab)
 
     cp host-network/01-netcfg.yaml.orig /etc/netplan/01-netcfg.yaml
     netplan apply && ip link del pnet0
+
+## AI assistant (Claude Code, Codex, OpenCode)
+
+Tombol **AI assistant** di kanan atas membuka panel AI di sisi kanan, menggantikan panel Lab selama terbuka.
+Pilih asistennya, lalu klik **Start on <lab>**. Asisten bekerja pada lab yang sedang dibuka, sedangkan console router
+tetap di bawah. Lebar panel bisa diubah dengan menyeret tepi kirinya.
+- **Claude Code**: login dengan akun Claude (Pro/Max) atau API key Anthropic.
+- **Codex**: login dengan akun ChatGPT (Plus/Pro) lewat kode perangkat. Buka `https://auth.openai.com/codex/device`
+  lalu masukkan kodenya. Kalau ditolak, aktifkan dulu *device code authorization* untuk Codex di pengaturan
+  keamanan ChatGPT.
+- **OpenCode** (open source): bisa langsung dipakai dengan model gratis. Ketik `/connect` atau klik **Sign in**
+  untuk memakai Claude, ChatGPT, GitHub Copilot, dan provider lain.
+
+Login disimpan di `data/ai/home/<provider>`, terpisah dari login Claude/Codex lain yang ada di server, dan
+dipakai bersama oleh semua user NetLab. Asisten mengakses lab lewat `nlctl`, yang bisa:
+- membaca topologi (`nlctl lab`);
+- menjalankan perintah di node (`nlctl run R1 "show ip route"`): vtysh/shell untuk container, serial console untuk VM;
+- menjalankan atau mematikan node.
+
+Sebelum menjalankan perintah, asisten meminta izin, kecuali kamu mengizinkannya. `nlctl` mengakses lab lewat API server
+NetLab di 127.0.0.1. Karena itu Codex tetap berjalan di sandbox-nya sendiri dan hanya diberi akses jaringan,
+supaya bisa menghubungi server NetLab.
+
+Console VM dibagi: tab console kamu dan asisten memakai console yang sama sekaligus, dan yang diketik asisten
+terlihat di tab kamu. Saat asisten mengakses sebuah node, console node itu otomatis terbuka di bawah dengan
+label "AI working", dan node-nya diberi garis oranye di lembar lab. Untuk router FRR/PC, tab "AI commands"
+menampilkan perintah dan output-nya. Asisten mengakses node satu per satu: perintah berikutnya menunggu sampai
+perintah sebelumnya selesai. Setiap asisten butuh RAM bebas sekitar 400 MB (`NETLAB_AI_MIN_RAM_MB`). Asisten berjalan sebagai root di server,
+sama seperti NetLab sendiri.
 
 ## Login dan user
 

@@ -235,6 +235,8 @@ def image_meta(name):
            "cpu": 1, "ram": TEMPLATES["qemu"]["ram"], "ifaces": TEMPLATES["qemu"]["ifaces"]}
     out.update(base)
     out["label"] = f"{base['label']} {version}".strip() if base else name
+    if "huawei" in name.lower():
+        out["backspace"] = "ctrl-h"  # VRP serial console erases with ^H, not DEL
     out.update(meta)
     return out
 
@@ -251,7 +253,7 @@ IMAGE_EXTS = (".qcow2", ".img", ".raw", ".vmdk", ".vhd", ".vhdx", ".vdi", ".iso"
 IMAGE_FORMATS = {"qcow2", "raw", "vmdk", "vpc", "vhdx", "vdi"}
 # settings a custom upload may set in netlab.json (never "extra": those are raw qemu arguments)
 IMAGE_META = {"label": str, "category": str, "ram": int, "cpu": int, "ifaces": int, "nic": str,
-              "disk_if": str, "iface_prefix": str, "iface_start": int}
+              "disk_if": str, "iface_prefix": str, "iface_start": int, "backspace": str}
 NICS = {"virtio-net-pci", "e1000", "e1000e", "vmxnet3", "rtl8139"}
 DISK_IFS = {"virtio", "ide", "scsi"}
 CATEGORIES = {"router", "switch", "firewall", "host", "other"}
@@ -314,6 +316,8 @@ def clean_meta(meta):
     if not 64 <= out.get("ram", 64) <= 65536 or not 1 <= out.get("cpu", 1) <= 16 \
             or not 1 <= out.get("ifaces", 1) <= 24 or not 0 <= out.get("iface_start", 0) <= 9:
         raise LabError("ram, cpu, ifaces or iface_start out of range")
+    if out.get("backspace", "del") not in ("del", "ctrl-h"):
+        raise LabError("backspace must be del or ctrl-h")
     if not re.fullmatch(r"[A-Za-z/-]{0,24}", out.get("iface_prefix", "")):
         raise LabError("invalid iface_prefix")
     return out
@@ -933,7 +937,10 @@ def _qemu_pid(lab_id, nid):
     if not st:
         return None
     try:
-        os.kill(st["pid"], 0)
+        try:
+            os.kill(st["pid"], 0)
+        except PermissionError:  # it exists; the caller just may not signal it
+            pass
         cmdline = Path(f"/proc/{st['pid']}/cmdline").read_bytes()
         return st["pid"] if container_name(lab_id, nid).encode() in cmdline else None
     except (OSError, KeyError):
@@ -1044,6 +1051,48 @@ def set_config(lab_id, node_id, text):
 
 
 # ---------------------------------------------------------------- consoles
+
+def strip_telnet(buf: bytes, state: dict) -> bytes:
+    """Drop telnet IAC negotiation coming from QEMU's telnet serial."""
+    out = bytearray()
+    for b in buf:
+        s = state.get("s", 0)
+        if s == 0:
+            if b == 255:
+                state["s"] = 1
+            else:
+                out.append(b)
+        elif s == 1:
+            state["s"] = 2 if b in (251, 252, 253, 254) else (3 if b == 250 else 0)
+            if b == 255:
+                out.append(255)
+        elif s == 2:
+            state["s"] = 0
+        elif s == 3 and b == 240:  # end of sub-negotiation
+            state["s"] = 0
+    return bytes(out)
+
+
+def exec_node(lab_id, node_id, lines, shell=False):
+    """Run commands in a container node: vtysh lines on FRR (unless shell), else one sh script."""
+    lab = load(lab_id)
+    node = lab["nodes"].get(node_id) or _raise("node not found")
+    tpl = TEMPLATES[node["template"]]
+    if tpl["kind"] != "docker":
+        raise LabError("exec works on container nodes; VMs are reached through their console")
+    if node_state(lab_id, node) != "running":
+        raise LabError(f"{node['name']} is not running")
+    if "vtysh" in tpl["consoles"] and not shell:
+        argv = ["vtysh"] + [a for line in lines for a in ("-c", line)]
+    else:
+        argv = ["sh", "-c", "\n".join(lines)]
+    try:
+        r = subprocess.run(["docker", "exec", container_name(lab_id, node_id)] + argv,
+                           capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise LabError("the command did not finish within 120 s")
+    return {"output": r.stdout + r.stderr, "code": r.returncode}
+
 
 def console_target(lab_id, node_id, kind):
     lab = load(lab_id)

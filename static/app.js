@@ -24,6 +24,7 @@ const state = {
   sel: null,          // {kind:'node'|'network'|'link', id}
   mode: null,         // {place:{template,image?}|{network:true}} or {connect:true, from:null|end}
   consoles: [],
+  aiActive: new Set(),  // node ids the AI assistant is working on right now
   active: null,
 };
 
@@ -136,6 +137,155 @@ async function changePassword() {
   if (nw.value !== rep.value) return toast("The new passwords do not match.");
   setSession(await api("POST", "/password", { current: cur.value, new: nw.value }));
   toast("Password changed.");
+}
+
+// ---------------------------------------------------------------- AI assistant panel
+
+// sessions: terminals in the panel; mode "chat" runs the agent on one lab, "login"/"logout" manage sign-in
+const ai = { open: store.get("netlab.ai.open") === "1", pick: store.get("netlab.ai.pick") || "claude",
+  providers: null, sessions: [] };
+
+async function aiLoadProviders() {
+  try { ai.providers = (await api("GET", "/ai")).providers; } catch { ai.providers = ai.providers || []; }
+  renderAI();
+}
+
+function aiToggle() {
+  ai.open = !ai.open;
+  store.set("netlab.ai.open", ai.open ? "1" : "0");
+  if (ai.open && !ai.providers) aiLoadProviders();
+  renderAI();
+  window.dispatchEvent(new Event("resize"));  // the sheet and the dock change width
+}
+
+function aiCurrent() {
+  return ai.sessions.find((c) => c.provider === ai.pick && c.mode !== "chat")
+    || ai.sessions.find((c) => c.provider === ai.pick && c.mode === "chat" && c.lab === state.lab?.id);
+}
+
+function aiStart(mode) {
+  const p = ai.providers?.find((x) => x.key === ai.pick);
+  if (!p) return;
+  if (mode === "chat" && !state.lab) return toast("Open a lab first.");
+  ai.sessions.filter((c) => c.provider === p.key && c.mode !== "chat").forEach(aiDispose);
+  const url = mode === "chat" ? `/ws/ai/${p.key}?mode=chat&lab=${state.lab.id}` : `/ws/ai/${p.key}?mode=${mode}`;
+  const c = makeTerm({ provider: p.key, mode, lab: mode === "chat" ? state.lab.id : null, url }, $("#aiTerms"),
+    () => (mode === "chat" ? renderAI() : aiLoadProviders()));
+  ai.sessions.push(c);
+  renderAI();
+  requestAnimationFrame(() => c.term.focus());
+}
+
+function aiDispose(c) {
+  c.ws.close(); c.term.dispose(); c.box.remove();
+  ai.sessions = ai.sessions.filter((x) => x !== c);
+  renderAI();
+}
+
+function renderAI() {
+  $("#aiPanel").hidden = !ai.open;
+  document.body.classList.toggle("ai-open", ai.open);
+  $("#aiBtn").classList.toggle("on", ai.open);
+  $("#aiBtn").setAttribute("aria-expanded", String(ai.open));
+  if (!ai.open) return;
+  const list = ai.providers || [];
+  const p = list.find((x) => x.key === ai.pick);
+  const live = (c) => c.ws.readyState <= 1;
+  $("#aiPick").replaceChildren(...(list.length ? list : [{ key: ai.pick, label: "Loading…" }]).map((x) => {
+    const running = ai.sessions.some((c) => c.provider === x.key && c.mode === "chat" && live(c));
+    return el("option", { value: x.key, text: x.label + (running ? " (running)" : ""), selected: x.key === ai.pick });
+  }));
+  $("#aiStatus").textContent = !p ? "Checking sign-in…" : !p.installed ? "Not installed"
+    : p.signed_in ? "Signed in" : p.key === "opencode" ? "Free models" : "Not signed in";
+
+  const cur = aiCurrent();
+  for (const c of ai.sessions) c.box.style.visibility = c === cur ? "visible" : "hidden";
+  const btn = (text, fn, cls) => el("button", { text, class: cls, onclick: fn, disabled: !p?.installed });
+  const acts = [];
+  if (cur && cur.mode !== "chat") acts.push(btn(live(cur) ? "Cancel" : "Done", () => aiDispose(cur)));
+  else {
+    acts.push(p?.signed_in ? btn("Sign out", () => aiStart("logout")) : btn("Sign in", () => aiStart("login")));
+    if (cur) acts.push(btn("Restart", () => { aiDispose(cur); aiStart("chat"); }), btn("Stop", () => aiDispose(cur)));
+  }
+  $("#aiActions").replaceChildren(...acts);
+
+  const empty = $("#aiEmpty");
+  empty.hidden = !!cur;
+  if (!cur) {
+    const start = btn(state.lab ? `Start on ${state.lab.name}` : "Open a lab first", () => aiStart("chat"), "accent");
+    if (!state.lab) start.disabled = true;
+    empty.replaceChildren(
+      el("p", { text: p ? p.account : "" }),
+      p && !p.installed ? el("p", {}, "Install it on the server: ", el("code", { text: p.install })) : start,
+      el("p", { class: "note", text: "The assistant works on the open lab: it reads the topology, runs commands on the "
+        + "nodes and can start or stop them. It asks before running commands unless you allow it." }),
+      el("p", { class: "note", text: "Sign-in is stored on the NetLab server and shared by every NetLab user. "
+        + "Each running assistant needs about 400 MB of free RAM." }));
+  } else requestAnimationFrame(() => cur.fit.fit());
+}
+
+$("#aiPick").addEventListener("change", (e) => {
+  ai.pick = e.target.value;
+  store.set("netlab.ai.pick", ai.pick);
+  renderAI();
+  aiCurrent()?.term.focus();
+});
+
+// drag the left edge of the panel to resize it
+$("#aiGrip").addEventListener("pointerdown", (e) => {
+  const grip = e.target; grip.setPointerCapture(e.pointerId);
+  const move = (ev) => {
+    const w = Math.max(320, Math.min(window.innerWidth - 480, window.innerWidth - ev.clientX));
+    document.documentElement.style.setProperty("--ai-w", w + "px");
+    window.dispatchEvent(new Event("resize"));
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", () => grip.removeEventListener("pointermove", move), { once: true });
+});
+
+// ---------------------------------------------------------------- updates
+
+let updateInfo = null;
+
+async function checkUpdate(force = false) {
+  try { updateInfo = await api("GET", "/update" + (force ? "?force=1" : "")); } catch { return; }
+  $("#version").textContent = "v" + updateInfo.version;
+  const btn = $("#updateBtn");
+  btn.hidden = !updateInfo.available;
+  btn.textContent = `Update to ${updateInfo.latest}`;
+}
+
+async function showUpdate() {
+  await checkUpdate(true);
+  const u = updateInfo;
+  if (!u) return;
+  if (u.error) return toast("Could not check for updates: " + u.error);
+  if (!u.available) return toast(`NetLab ${u.version} is up to date.`);
+  const body = el("div", {},
+    el("p", { text: `NetLab ${u.latest} is available. Installed: ${u.version}.` }),
+    u.notes ? el("p", { class: "notes", text: u.notes }) : "",
+    u.changes.length ? el("ul", { class: "changes" }, ...u.changes.map((c) => el("li", { text: c }))) : "",
+    el("p", { class: "note", text: "The web page reloads when the update is done. Running labs and VMs keep running, "
+      + "and labs, images and users are kept. If the new version does not start, NetLab goes back to this one." }));
+  if (!(await modal({ title: "Update NetLab", body, ok: `Update to ${u.latest}`, wide: true }))) return;
+  await api("POST", "/update", { version: u.latest });
+  followUpdate(u.version);
+}
+
+// the server restarts during the update, so poll the sign-in-free status until it settles
+async function followUpdate(from) {
+  const t = $("#toast");
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let s;
+    try { s = await (await fetch("/api/update/status", { cache: "no-store" })).json(); }
+    catch { t.textContent = "Updating NetLab: restarting…"; continue; }
+    if (s.state === "running") t.textContent = `Updating NetLab: ${s.step || "working"}…`;
+    else if (s.state === "done" && s.version !== from) { t.textContent = `Updated to ${s.version}. Reloading…`; location.reload(); return; }
+    else if (s.state === "failed") { t.hidden = true; toast("Update failed: " + s.error); checkUpdate(); return; }
+  }
 }
 
 // ---------------------------------------------------------------- VM images
@@ -293,11 +443,13 @@ async function openLab(id) {
   state.status = state.lab.status || {};
   state.linkStatus = state.lab.link_status || {};
   state.linkBornAt.clear(); state.linkUpAt.clear();
+  aiSeed(state.lab.ai); state.aiActive = new Set();
   state.sel = null;
   store.set("netlab.lab", id);
   state.zoom = Number(store.get("netlab.zoom." + id)) || 1;
   applyZoom();
   render();
+  renderAI();
 }
 
 async function reloadLab() {
@@ -335,6 +487,7 @@ const actions = {
       body: el("p", { text: "All nodes are stopped and their saved configs are removed." }) });
     if (!ok) return;
     closeConsoles((c) => c.lab === state.lab.id);
+    ai.sessions.filter((c) => c.lab === state.lab.id).forEach(aiDispose);
     await api("DELETE", `/labs/${state.lab.id}`);
     store.set("netlab.lab", "");
     await loadLabs();
@@ -363,8 +516,11 @@ const actions = {
   },
   changePassword,
   signOut,
+  toggleAI: aiToggle,
+  showUpdate,
   manageImages() { manageImages(); },
   cancelUpload() { if (upload && confirm("Cancel the upload?")) upload.xhr.abort(); },
+  cancelMode() { setMode(null); },
   toggleConnect() { setMode(state.mode?.connect ? null : { connect: true, from: null }); },
 };
 
@@ -530,7 +686,17 @@ function endName(end) {
   return `${state.lab.nodes[end.node]?.name || "?"} ${ifName(end.node, end.iface)}`;
 }
 
+function renderModeBar() {
+  const m = state.mode, bar = $("#modeBar");
+  bar.hidden = !m;
+  if (!m) return;
+  const from = m.from && (m.from.node ? state.lab?.nodes[m.from.node] : state.lab?.networks[m.from.network]);
+  bar.querySelector("span").textContent = m.place ? "Click the lab sheet to place the device."
+    : from ? `Connect from ${from.name}: click the device to connect to.` : "Connect: click the first device.";
+}
+
 function render() {
+  renderModeBar();
   const lab = state.lab;
   $("#empty").hidden = !!lab;
   $("#zoomBar").hidden = !lab;
@@ -600,7 +766,8 @@ function render() {
 
   const drawThing = (kind, o, icon, running, folio) => {
     const g = svg("g", {
-      class: `node${running ? " running" : ""}${isSel(kind, o.id) ? " sel" : ""}${pickedFrom(kind, o.id) ? " pick" : ""}`,
+      class: `node${running ? " running" : ""}${isSel(kind, o.id) ? " sel" : ""}${pickedFrom(kind, o.id) ? " pick" : ""}`
+        + (kind === "node" && state.aiActive.has(o.id) ? " ai" : ""),
       transform: `translate(${o.x},${o.y})`, "data-kind": kind, "data-id": o.id,
     });
     g.append(svg("rect", { class: "frame", x: -34, y: -34, width: 68, height: 84 }));
@@ -721,7 +888,7 @@ function showMenu(kind, o) {
     await api("PATCH", `/labs/${state.lab.id}/${kind === "node" ? "nodes" : "networks"}/${o.id}`, { name });
     await reloadLab();
   };
-  const connect = () => { setMode({ connect: true }); state.mode.from = kind === "node" ? { node: o.id } : { network: o.id }; render(); };
+  const connect = () => { setMode({ connect: true, once: true }); state.mode.from = kind === "node" ? { node: o.id } : { network: o.id }; render(); };
   menu.append(el("div", { class: "menu-title", text: o.name }));
   if (kind === "node") {
     const acts = nodeActions(o), del = acts.pop();
@@ -828,19 +995,23 @@ $("#canvas").addEventListener("pointerdown", async (e) => {
     try { await placeDevice(m, p); } catch {}
     return;
   }
-  if (state.mode?.connect) { state.mode.from = null; $("#ghost").setAttribute("visibility", "hidden"); render(); return; }
+  if (state.mode?.connect) {
+    if (state.mode.once) return setMode(null);  // "Connect to…" from the menu: a click on empty space cancels
+    state.mode.from = null; $("#ghost").setAttribute("visibility", "hidden"); render(); return;
+  }
   select(null);
 });
 
 async function connectClick(kind, o) {
   const end = kind === "node" ? { node: o.id } : { network: o.id };
-  const from = state.mode.from;
+  const from = state.mode.from, once = state.mode.once;
   if (!from) {
     state.mode.from = end; render(); return;
   }
   state.mode.from = null;
   $("#ghost").setAttribute("visibility", "hidden");
   render();
+  if (once) setMode(null);
   if (!sameEnd(from, end)) await linkDialog(from, end);
 }
 
@@ -1084,16 +1255,21 @@ document.addEventListener("keydown", (e) => {
 
 // ---------------------------------------------------------------- consoles
 
-function openConsole(n, kind) {
+function openConsole(n, kind, focus = true) {
   if (state.status[n.id] !== "running") return toast(`${n.name} is not running. Start it first.`);
   const tpl = state.tpl.templates[n.template];
   kind = kind || tpl.consoles[0];
-  const existing = state.consoles.find((c) => c.lab === state.lab.id && c.node === n.id && c.kind === kind && c.ws.readyState <= 1);
-  if (existing) return showConsole(existing);
+  // some devices (Huawei VRP, ...) erase with Ctrl+H instead of DEL; remembered per image in this browser
+  const bsKey = "netlab.backspace." + (n.image || n.template);
+  const bsDefault = state.tpl.qemu_images.find((m) => m.name === n.image)?.backspace || "del";
+  openTerm({ key: `node/${state.lab.id}/${n.id}/${kind}`, lab: state.lab.id, node: n.id, kind, title: n.name,
+    url: `/ws/console/${state.lab.id}/${n.id}?kind=${kind}`, bsKey, bs: store.get(bsKey) || bsDefault }, focus);
+}
 
-  $("#dock").hidden = false;
+// a browser terminal on a server WebSocket, mounted in parent: node consoles and AI assistant sessions
+function makeTerm(spec, parent, onclose) {
   const box = el("div", { class: "term" });
-  $("#terms").append(box);
+  parent.append(box);
   const term = new Terminal({
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fontSize: 13, cursorBlink: true,
     theme: { background: "#FFFFFF", foreground: "#111111", cursor: "#FF4F00", selectionBackground: "#FFD3BF" },
@@ -1102,28 +1278,73 @@ function openConsole(n, kind) {
   term.loadAddon(fit);
   term.open(box);
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws/console/${state.lab.id}/${n.id}?token=${encodeURIComponent(state.token)}&kind=${kind}`);
+  const sep = spec.url?.includes("?") ? "&" : "?";
+  // no url: a read-only log (the assistant's commands on a container node)
+  const ws = spec.url ? new WebSocket(`${proto}://${location.host}${spec.url}${sep}token=${encodeURIComponent(state.token)}`)
+    : { readyState: 1, send() {}, close() { this.readyState = 3; } };
   ws.binaryType = "arraybuffer";
-  const c = { id: crypto.randomUUID?.() || String(Math.random()), lab: state.lab.id, node: n.id, kind, title: n.name, term, fit, ws, box };
+  const c = { id: crypto.randomUUID?.() || String(Math.random()), ...spec, term, fit, ws, box };
   const resize = () => ws.readyState === 1 && ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
   ws.onopen = () => { fit.fit(); resize(); };
   ws.onmessage = (e) => term.write(new Uint8Array(e.data));
   ws.onclose = (e) => {
     term.write(e.code === 4401 ? "\r\n\x1b[2m[session expired: sign in again, then reopen the console]\x1b[0m\r\n"
       : "\r\n\x1b[2m[console closed]\x1b[0m\r\n");
-    renderTabs();
+    onclose?.();
   };
-  term.onData((d) => ws.readyState === 1 && ws.send(JSON.stringify({ t: "i", d })));
+  term.onData((d) => {
+    if (c.bs === "ctrl-h") d = d.replace(/\x7f/g, "\x08");
+    if (ws.readyState === 1) ws.send(JSON.stringify({ t: "i", d }));
+  });
   term.onResize(resize);
-  state.consoles.push(c);
-  showConsole(c);
+  return c;
 }
 
-function showConsole(c) {
+function openTerm(spec, focus = true) {
+  const existing = state.consoles.find((c) => c.key === spec.key && c.ws.readyState <= 1);
+  if (existing) { showConsole(existing, focus); return existing; }
+  $("#dock").hidden = false;
+  const c = makeTerm(spec, $("#terms"), renderTabs);
+  state.consoles.push(c);
+  showConsole(c, focus);
+  return c;
+}
+
+// ---------------------------------------------------------------- following the AI assistant
+
+// node id -> {seq, log} last shown; seeded when a lab opens, so earlier activity does not pop tabs
+const aiSeen = {};
+
+function aiSeed(activity) {
+  for (const k of Object.keys(aiSeen)) delete aiSeen[k];
+  for (const [id, r] of Object.entries(activity || {})) aiSeen[id] = { seq: r.seq, log: r.log || "" };
+}
+
+// open the console of each node the assistant reaches (one at a time), without taking the keyboard
+function followAI(activity) {
+  for (const [id, r] of Object.entries(activity || {})) {
+    const n = state.lab.nodes[id], seen = aiSeen[id];
+    if (!n || (seen && seen.seq === r.seq && seen.log === (r.log || ""))) continue;
+    aiSeen[id] = { seq: r.seq, log: r.log || "" };
+    if (state.tpl.templates[n.template].kind === "qemu") {
+      if (!seen || seen.seq !== r.seq) openConsole(n, undefined, false);
+      continue;
+    }
+    // containers run the assistant's commands with exec: show them in an "AI" log tab
+    const c = openTerm({ key: `ailog/${state.lab.id}/${id}`, lab: state.lab.id, node: id, kind: "AI commands",
+      title: n.name }, false);
+    const log = r.log || "";
+    c.term.write(seen && seen.seq === r.seq && log.startsWith(seen.log) ? log.slice(seen.log.length) : "\r\n" + log);
+  }
+  const active = new Set(Object.entries(activity || {}).filter(([, r]) => r.active).map(([id]) => id));
+  if (String([...active]) !== String([...state.aiActive])) { state.aiActive = active; renderTabs(); render(); }
+}
+
+function showConsole(c, focus = true) {
   state.active = c.id;
   for (const x of state.consoles) x.box.style.visibility = x === c ? "visible" : "hidden";
   renderTabs();
-  requestAnimationFrame(() => { c.fit.fit(); c.term.focus(); });
+  requestAnimationFrame(() => { c.fit.fit(); if (focus) c.term.focus(); });
 }
 
 function closeConsole(c) {
@@ -1145,8 +1366,11 @@ function renderTabs() {
   for (const c of state.consoles) {
     const closeBtn = el("button", { "aria-label": `Close ${c.title} console`, text: "Close",
       onclick: (e) => { e.stopPropagation(); closeConsole(c); } });
+    const bsBtn = c.bsKey && el("button", { text: c.bs === "ctrl-h" ? "Backspace: Ctrl+H" : "Backspace: DEL",
+      title: "What the Backspace key sends. Switch it if Backspace does not erase on this device.",
+      onclick: (e) => { e.stopPropagation(); c.bs = c.bs === "ctrl-h" ? "del" : "ctrl-h"; store.set(c.bsKey, c.bs); renderTabs(); c.term.focus(); } });
     tabs.append(el("div", { class: "tab" + (c.id === state.active ? " on" : ""), onclick: () => showConsole(c) },
-      el("b", { text: c.title }), el("span", { text: c.ws.readyState > 1 ? `${c.kind}, closed` : c.kind }), closeBtn));
+      el("b", { text: c.title }), el("span", { text: c.ws.readyState > 1 ? `${c.kind}, closed` : c.kind + (c.node && state.aiActive.has(c.node) && c.lab === state.lab?.id ? " · AI working" : "") }), ...(bsBtn ? [bsBtn] : []), closeBtn));
   }
 }
 
@@ -1161,7 +1385,7 @@ $("#dockGrip").addEventListener("pointerdown", (e) => {
   grip.addEventListener("pointermove", move);
   grip.addEventListener("pointerup", () => grip.removeEventListener("pointermove", move), { once: true });
 });
-window.addEventListener("resize", () => state.consoles.forEach((c) => c.fit.fit()));
+window.addEventListener("resize", () => [...state.consoles, ...ai.sessions].forEach((c) => c.fit.fit()));
 
 // ---------------------------------------------------------------- boot
 
@@ -1169,6 +1393,7 @@ async function poll() {
   if (state.lab && !drag && document.visibilityState === "visible") {
     try {
       const s = await api("GET", `/labs/${state.lab.id}/status`);
+      followAI(s.ai);
       if (JSON.stringify(s.nodes) !== JSON.stringify(state.status) || JSON.stringify(s.links) !== JSON.stringify(state.linkStatus)) {
         state.status = s.nodes;
         absorbLinkStatus(s.links);
@@ -1176,7 +1401,8 @@ async function poll() {
       }
     } catch {}
   }
-  setTimeout(poll, 3000);
+  // follow the assistant closely while one is running
+  setTimeout(poll, ai.sessions.some((c) => c.mode === "chat" && c.ws.readyState <= 1) ? 1000 : 3000);
 }
 
 (async function boot() {
@@ -1188,5 +1414,9 @@ async function poll() {
   state.tpl = await api("GET", "/templates");
   renderPalette();
   await loadLabs();
+  if (ai.open) aiLoadProviders();
+  renderAI();
+  checkUpdate();
+  setInterval(checkUpdate, 6 * 3600 * 1000);
   poll();
 })();

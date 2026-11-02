@@ -10,7 +10,7 @@
 </head>
 <body>
 <header class="bar">
-  <div class="wordmark">NetLab</div>
+  <div class="wordmark">NetLab <span id="version" class="version"></span></div>
   <div class="group">
     <select id="labSelect" aria-label="Lab"></select>
     <button data-act="newLab">New</button>
@@ -27,6 +27,8 @@
     <button data-act="stopLab">Stop all</button>
   </div>
   <div class="group user">
+    <button id="updateBtn" data-act="showUpdate" class="accent" hidden></button>
+    <button data-act="toggleAI" id="aiBtn" aria-controls="aiPanel" aria-expanded="false">AI assistant</button>
     <span id="userName" class="who"></span>
     <button data-act="changePassword">Change password</button>
     <button data-act="signOut">Sign out</button>
@@ -44,6 +46,8 @@
   </form>
 </section>
 
+<div class="shell">
+<div class="center">
 <main class="work">
   <aside class="palette">
     <h2>Device</h2>
@@ -114,6 +118,7 @@
       <div class="row"><button data-act="newLab">New lab</button><button data-act="demoLab" class="accent">Demo lab</button></div>
     </div>
   </section>
+  <div class="modebar" id="modeBar" hidden><span></span><button data-act="cancelMode">Cancel <kbd>Esc</kbd></button></div>
   <div class="zoom" id="zoomBar" role="group" aria-label="Zoom">
     <button data-act="zoomOut" aria-label="Zoom out" title="Zoom out (-)"><svg viewBox="0 0 16 16"><path d="M3 8h10"/></svg></button>
     <button data-act="zoomReset" id="zoomLevel" title="Reset to 100% (0)">100%</button>
@@ -130,6 +135,24 @@
   <nav class="tabs" id="tabs"></nav>
   <div class="terms" id="terms"></div>
 </section>
+</div>
+
+<aside class="aipanel" id="aiPanel" aria-label="AI assistant" hidden>
+  <div class="ai-grip" id="aiGrip"></div>
+  <div class="ai-head">
+    <h2>AI assistant</h2>
+    <button data-act="toggleAI">Close</button>
+  </div>
+  <div class="ai-bar">
+    <select id="aiPick" aria-label="Assistant"></select>
+    <span id="aiStatus" class="ai-status"></span>
+    <span id="aiActions" class="ai-actions"></span>
+  </div>
+  <div class="ai-terms" id="aiTerms">
+    <div class="ai-empty" id="aiEmpty"></div>
+  </div>
+</aside>
+</div>
 
 <div class="modal-back" id="modal" hidden>
   <form class="modal" id="modalForm">

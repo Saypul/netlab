@@ -13,8 +13,10 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Request, WebSocket, W
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import ai
 import auth as accounts
 import engine
+import updater
 
 STATIC = Path(__file__).resolve().parent / "static"
 FIRST_RUN = accounts.ensure_admin()
@@ -136,6 +138,37 @@ def delete_image(name: str):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- updates (GitHub releases)
+
+@app.get("/api/update", dependencies=[api])
+async def update_info(force: int = 0):
+    out = {"version": updater.version(), "status": updater.status()}
+    try:
+        out.update(await asyncio.to_thread(updater.check if force else updater.cached_check))
+    except (updater.UpdateError, OSError, subprocess.SubprocessError) as e:
+        out["error"] = str(e)
+    return out
+
+
+@app.get("/api/update/status")
+def update_status():  # no sign-in: the page polls it while the server restarts, and it reveals nothing
+    return {"version": updater.version(), **updater.status()}
+
+
+@app.post("/api/update", dependencies=[api])
+def update_start(body: dict = Body(default={})):
+    try:
+        updater.start_background(body.get("version"))
+    except updater.UpdateError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/ai", dependencies=[api])
+def ai_providers():
+    return {"providers": ai.providers()}
+
+
 @app.get("/api/labs", dependencies=[api])
 def labs():
     return engine.list_labs()
@@ -153,6 +186,7 @@ def get_lab(lab_id: str):
     lab = engine.load(lab_id)
     lab["status"] = engine.lab_status(lab_id)
     lab["link_status"] = engine.link_status(lab_id)
+    lab["ai"] = AI_ACTIVITY.get(lab_id, {})
     return lab
 
 
@@ -167,9 +201,31 @@ def delete_lab(lab_id: str):
     return {"ok": True}
 
 
+# ------------------------------------------------ AI activity
+# The assistant reaches one node at a time per lab (AI_LOCKS). Each access bumps the node's seq, so the
+# browser opens that node's console (VMs) or its AI log tab (containers: commands run via exec, with log).
+AI_LOCKS: dict = {}
+AI_ACTIVITY: dict = {}  # lab id -> node id -> {"seq", "active", "log"?}
+AI_SEQ = iter(range(1, 1 << 62))
+
+
+def _ai_lock(lab_id):
+    return AI_LOCKS.setdefault(lab_id, asyncio.Lock())
+
+
+def _ai_mark(lab_id, node_id, active, log=None):
+    rec = AI_ACTIVITY.setdefault(lab_id, {}).setdefault(node_id, {})
+    if active:
+        rec["seq"] = next(AI_SEQ)
+    rec["active"] = active
+    if log is not None:
+        rec["log"] = log[-8192:]
+
+
 @app.get("/api/labs/{lab_id}/status", dependencies=[api])
 def status(lab_id: str):
-    return {"nodes": engine.lab_status(lab_id), "links": engine.link_status(lab_id)}
+    return {"nodes": engine.lab_status(lab_id), "links": engine.link_status(lab_id),
+            "ai": AI_ACTIVITY.get(lab_id, {})}
 
 
 @app.post("/api/labs/{lab_id}/start", dependencies=[api])
@@ -208,6 +264,24 @@ def get_config(lab_id: str, node_id: str):
 def set_config(lab_id: str, node_id: str, body: dict = Body(...)):
     engine.set_config(lab_id, node_id, str(body.get("text", "")))
     return {"ok": True}
+
+
+@app.post("/api/labs/{lab_id}/nodes/{node_id}/exec", dependencies=[api])
+async def node_exec(lab_id: str, node_id: str, body: dict = Body(...)):
+    lines = body.get("lines")
+    if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+        raise HTTPException(400, "lines must be a list of strings")
+    if not body.get("ai"):
+        return await asyncio.to_thread(engine.exec_node, lab_id, node_id, lines, bool(body.get("shell")))
+    async with _ai_lock(lab_id):
+        _ai_mark(lab_id, node_id, True, "".join(f"\x1b[1m> {x}\x1b[0m\r\n" for x in lines))
+        try:
+            r = await asyncio.to_thread(engine.exec_node, lab_id, node_id, lines, bool(body.get("shell")))
+        except engine.LabError as e:
+            _ai_mark(lab_id, node_id, False, AI_ACTIVITY[lab_id][node_id]["log"] + f"*** {e} ***\r\n")
+            raise
+        _ai_mark(lab_id, node_id, False, AI_ACTIVITY[lab_id][node_id]["log"] + r["output"].replace("\n", "\r\n"))
+        return r
 
 
 @app.post("/api/labs/{lab_id}/nodes/{node_id}/{action}", dependencies=[api])
@@ -250,29 +324,9 @@ def delete_link(lab_id: str, link_id: str):
 # client -> server: JSON {"t":"i","d":"<keys>"} or {"t":"r","c":cols,"r":rows}
 # server -> client: raw terminal bytes (binary frames)
 
-def _strip_telnet(buf: bytes, state: dict) -> bytes:
-    """Drop telnet IAC negotiation coming from QEMU's telnet serial."""
-    out = bytearray()
-    for b in buf:
-        s = state.get("s", 0)
-        if s == 0:
-            if b == 255:
-                state["s"] = 1
-            else:
-                out.append(b)
-        elif s == 1:
-            state["s"] = 2 if b in (251, 252, 253, 254) else (3 if b == 250 else 0)
-            if b == 255:
-                out.append(255)
-        elif s == 2:
-            state["s"] = 0
-        elif s == 3 and b == 240:  # end of sub-negotiation
-            state["s"] = 0
-    return bytes(out)
-
-
 @app.websocket("/ws/console/{lab_id}/{node_id}")
-async def console(ws: WebSocket, lab_id: str, node_id: str, token: str = "", kind: str = ""):
+async def console(ws: WebSocket, lab_id: str, node_id: str, token: str = "", kind: str = "", history: int = 1,
+                  ai: int = 0):
     await ws.accept()  # accept first so the browser sees close code 4401, not a bare handshake failure
     if not accounts.verify(token):
         await ws.close(code=4401)
@@ -285,16 +339,26 @@ async def console(ws: WebSocket, lab_id: str, node_id: str, token: str = "", kin
         return
     if mode == "pty":
         await _pty_console(ws, target)
+    elif ai:  # the assistant: wait for its turn in this lab, then tell it to start typing
+        async with _ai_lock(lab_id):
+            _ai_mark(lab_id, node_id, True)
+            try:
+                await ws.send_text("ready")
+                await _tcp_console(ws, target, False)
+            except (WebSocketDisconnect, RuntimeError):
+                pass
+            finally:
+                _ai_mark(lab_id, node_id, False)
     else:
-        await _tcp_console(ws, target)
+        await _tcp_console(ws, target, bool(history))
 
 
-async def _pty_console(ws, argv):
+async def _pty_console(ws, argv, cwd=None, env=None):
     loop = asyncio.get_running_loop()
     master, slave = os.openpty()
     # setsid -c gives docker exec a controlling tty, so window resizes reach it
     proc = subprocess.Popen(["setsid", "-w", "-c"] + argv, stdin=slave, stdout=slave,
-                            stderr=slave, close_fds=True)
+                            stderr=slave, close_fds=True, cwd=cwd, env=env)
     os.close(slave)
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -336,32 +400,108 @@ async def _pty_console(ws, argv):
         await asyncio.to_thread(proc.wait)
 
 
-async def _tcp_console(ws, port):
+# AI assistant: mode "chat" runs the agent on the lab, "login"/"logout" manage the provider's sign-in
+@app.websocket("/ws/ai/{provider}")
+async def ai_console(ws: WebSocket, provider: str, token: str = "", lab: str = "", mode: str = "chat"):
+    await ws.accept()
+    user = accounts.verify(token)
+    if not user:
+        await ws.close(code=4401)
+        return
     try:
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        argv, cwd, env = await asyncio.to_thread(ai.session, provider, lab, mode, user)
+    except engine.LabError as e:
+        await ws.send_bytes(f"\r\n*** {e} ***\r\n".encode())
+        await ws.close()
+        return
+    await _pty_console(ws, argv, cwd, env)
+
+
+class SerialHub:
+    """One connection to a VM's serial console (QEMU takes a single client), shared by every
+    console tab and the AI assistant: input from any of them, output to all of them."""
+    hubs: dict = {}
+    tails: dict = {}  # port -> recent output, kept after the last client leaves
+    TAIL = 4096  # recent output replayed to a new tab, so it shows the current prompt
+
+    def __init__(self, port):
+        self.port, self.clients, self.state = port, set(), {}
+        self.tail = self.tails.pop(port, bytearray())
+        self.reader = self.writer = self.task = None
+
+    @classmethod
+    async def get(cls, port):
+        hub = cls.hubs.get(port)
+        if hub is None:
+            hub = cls(port)
+            hub.reader, hub.writer = await asyncio.open_connection("127.0.0.1", port)  # OSError if the VM is gone
+            if port in cls.hubs:  # another client connected meanwhile
+                hub.writer.close()
+                return cls.hubs[port]
+            cls.hubs[port] = hub
+            hub.task = asyncio.create_task(hub._pump())
+        return hub
+
+    async def _pump(self):
+        try:
+            while data := await self.reader.read(65536):
+                data = engine.strip_telnet(data, self.state)
+                self.tail = (self.tail + data)[-self.TAIL:]
+                for ws in list(self.clients):
+                    try:
+                        await ws.send_bytes(data)
+                    except Exception:
+                        self.clients.discard(ws)
+        except OSError:
+            pass
+        self._close()
+        for ws in list(self.clients):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    def _close(self):
+        if self.hubs.get(self.port) is self:
+            del self.hubs[self.port]
+            if len(self.tails) > 256:
+                self.tails.clear()
+            self.tails[self.port] = self.tail
+        self.writer.close()
+
+    async def join(self, ws, history):
+        if history and self.tail:
+            await ws.send_bytes(bytes(self.tail))
+        self.clients.add(ws)
+
+    def leave(self, ws):
+        self.clients.discard(ws)
+        if not self.clients:
+            self.task.cancel()
+            self._close()
+
+    async def write(self, data: bytes):
+        self.writer.write(data.replace(b"\xff", b"\xff\xff"))
+        await self.writer.drain()
+
+
+async def _tcp_console(ws, port, history=True):
+    try:
+        hub = await SerialHub.get(port)
     except OSError as e:
         await ws.send_bytes(f"\r\n*** serial console unavailable: {e} ***\r\n".encode())
         await ws.close()
         return
-    state: dict = {}
-
-    async def pump_out():
-        while data := await reader.read(65536):
-            await ws.send_bytes(_strip_telnet(data, state))
-        await ws.close()
-
-    out_task = asyncio.create_task(pump_out())
+    await hub.join(ws, history)
     try:
         while True:
             msg = json.loads(await ws.receive_text())
             if msg.get("t") == "i":
-                writer.write(msg["d"].encode().replace(b"\xff", b"\xff\xff"))
-                await writer.drain()
+                await hub.write(msg["d"].encode())
     except (WebSocketDisconnect, RuntimeError, OSError, ValueError):
         pass
     finally:
-        out_task.cancel()
-        writer.close()
+        hub.leave(ws)
 
 
 if __name__ == "__main__":
