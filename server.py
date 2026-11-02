@@ -3,6 +3,7 @@ import asyncio
 import fcntl
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -162,6 +163,15 @@ def update_start(body: dict = Body(default={})):
     except updater.UpdateError as e:
         raise HTTPException(409, str(e))
     return {"ok": True}
+
+
+@app.put("/api/update/token", dependencies=[api])
+async def update_token(body: dict = Body(...)):
+    token = str(body.get("token", "")).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{20,255}", token):
+        raise HTTPException(400, "that does not look like a GitHub token")
+    updater.set_token(token)
+    return await update_info(force=1)
 
 
 @app.get("/api/ai", dependencies=[api])

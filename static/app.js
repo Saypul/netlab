@@ -259,6 +259,7 @@ async function showUpdate() {
   await checkUpdate(true);
   const u = updateInfo;
   if (!u) return;
+  if (u.error && /token/.test(u.error)) return askToken();
   if (u.error) return toast("Could not check for updates: " + u.error);
   if (!u.available) return toast(`NetLab ${u.version} is up to date.`);
   const body = el("div", {},
@@ -270,6 +271,21 @@ async function showUpdate() {
   if (!(await modal({ title: "Update NetLab", body, ok: `Update to ${u.latest}`, wide: true }))) return;
   await api("POST", "/update", { version: u.latest });
   followUpdate(u.version);
+}
+
+// the NetLab repository is private: updates need a read-only GitHub token, kept on the server
+async function askToken() {
+  const input = el("input", { type: "password", autocomplete: "off", placeholder: "github_pat_…" });
+  const body = el("div", {},
+    el("p", { text: "Updates come from a private GitHub repository. Paste a GitHub token that can read it "
+      + "(fine-grained token, Contents: Read-only)." }), input,
+    el("p", { class: "note", text: "The token stays on this server and is used only to download NetLab releases." }));
+  if (!(await modal({ title: "GitHub token for updates", body, ok: "Save and check" }))) return;
+  try { updateInfo = await api("PUT", "/update/token", { token: input.value.trim() }); }
+  catch { return; }  // api() already showed the error
+  if (updateInfo.error) return toast("GitHub still refuses access: " + updateInfo.error);
+  checkUpdate();
+  showUpdate();
 }
 
 // the server restarts during the update, so poll the sign-in-free status until it settles

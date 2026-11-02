@@ -51,6 +51,32 @@ Membuat rilis (dari mesin developer):
 Skrip ini menulis `VERSION`, commit, membuat tag `v1.1.0` (pesannya jadi catatan rilis), lalu push setelah
 dikonfirmasi. Semua server NetLab kemudian melihat update tersebut.
 
+Klik nomor versi di samping logo NetLab untuk mengecek update kapan saja. Kalau server belum punya token
+GitHub, kolom token muncul di situ (sama dengan `netlab token`).
+
+## Appliance VMware (.ova), seperti EVE-NG
+
+Untuk Windows dan Mac Intel: satu file `NetLab-x.y.z.ova` yang tinggal di-import ke VMware Workstation
+(Pro, sekarang gratis), Player, atau Fusion.
+
+1. VMware: **File > Open**, pilih file `.ova`, beri nama, **Import**.
+2. Sebelum dinyalakan: **Edit virtual machine settings > Processors**, centang
+   **Virtualize Intel VT-x/EPT or AMD-V/RVI** (supaya VM router di dalam NetLab cepat). Atur RAM/CPU sesuai
+   kebutuhan (default 8 GB, 4 CPU). Jaringan default NAT; pilih Bridged kalau mau diakses dari PC lain.
+3. Nyalakan. Layar console menampilkan alamat yang dibuka di browser dan password admin pertama.
+4. Login console/SSH: `root`, password pertama `netlab` (wajib diganti saat login pertama).
+
+Catatan Windows: kalau Hyper-V, WSL2, atau Docker Desktop aktif, VMware tidak bisa memberi VT-x ke VM, jadi
+VM router berjalan lambat. Router/PC container (FRR, Alpine) tidak terpengaruh.
+
+Setiap salinan yang di-import membuat password admin, SSH host key, dan machine id sendiri saat boot pertama.
+Appliance tidak berisi token GitHub: untuk update online, klik nomor versi di web lalu tempel token
+(atau `netlab token` di console).
+
+Membuat file `.ova` (di server Linux dengan KVM, sekitar 20 menit, perlu ~10 GB disk kosong):
+
+    appliance/build-ova.sh v1.0.1      # hasil: dist/NetLab-1.0.1.ova
+
 ## Cara pakai
 
 - **Device**: seret device (dikelompokkan per Router, Switch, Firewall, PC/Host) ke lembar lab.
