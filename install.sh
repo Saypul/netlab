@@ -95,7 +95,7 @@ ip=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo
 echo "NetLab $(cat "$DIR/VERSION") is running: http://${ip:-<server>}:$PORT/"
 if [ -f "$DIR/data/initial_password" ]; then
-  echo "First sign-in: user admin, password $(cat "$DIR/data/initial_password")"
+  echo "First sign-in: user admin, password netlab (you are asked to change it)"
 fi
 [ -e /dev/kvm ] || echo "note: /dev/kvm is missing, so VMs run without hardware acceleration (slow)"
 echo "Manage it with: netlab update | netlab status | netlab logs | netlab user passwd <user>"

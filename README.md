@@ -4,6 +4,18 @@ Simulator jaringan berbasis web, mirip EVE-NG/PNETLab. Router (FRRouting) dan PC
 berjalan sebagai container Docker. VM QEMU dari image `.qcow2` milikmu sendiri juga bisa dijalankan.
 Setiap kabel atau switch adalah Linux bridge, sehingga link bisa ditambah atau dicabut saat lab berjalan.
 
+## Login default
+
+| | User | Password |
+|---|---|---|
+| Web NetLab | `admin` | `netlab` |
+| Console / SSH appliance (.ova) | `root` | `netlab` |
+
+Setelah login dengan password default, NetLab langsung meminta password baru (minimal 8 karakter). Login
+root di appliance juga wajib ganti password saat pertama kali. Segera ganti keduanya, terutama kalau server
+bisa diakses dari jaringan lain atau internet. Akun `admin` / `netlab` hanya dibuat saat instalasi baru;
+server yang sudah punya user tidak berubah.
+
 ## Instalasi di server (Ubuntu / Debian)
 
 Repo ini private, jadi installer butuh token GitHub yang punya akses baca ke `Saypul/netlab`.
@@ -17,7 +29,7 @@ Installer melakukan hal berikut:
 - memasang Docker, QEMU, dnsmasq, dan Python;
 - mengambil rilis terbaru ke `/opt/netlab`;
 - membuat service `netlab` dan perintah `netlab`;
-- menampilkan alamat web dan password awal user `admin`.
+- menampilkan alamat web untuk login.
 
 Variabel yang bisa diatur: `NETLAB_DIR`, `NETLAB_PORT` (default 8765), dan `NETLAB_REF` (tag/branch tertentu).
 
@@ -30,7 +42,6 @@ Perintah di server:
     netlab user list | passwd <user> | deluser <user>
 
 Menjalankan manual tanpa installer: `sudo ./run.sh`, lalu buka `http://<server>:8765/`.
-Password pertama ada di `data/initial_password`.
 
 Variabel env: `NETLAB_HOST` (default 0.0.0.0), `NETLAB_PORT` (8765), `NETLAB_JWT_TTL` (detik, default 43200), `NETLAB_DATA`.
 
@@ -63,13 +74,13 @@ Untuk Windows dan Mac Intel: satu file `NetLab-x.y.z.ova` yang tinggal di-import
 2. Sebelum dinyalakan: **Edit virtual machine settings > Processors**, centang
    **Virtualize Intel VT-x/EPT or AMD-V/RVI** (supaya VM router di dalam NetLab cepat). Atur RAM/CPU sesuai
    kebutuhan (default 8 GB, 4 CPU). Jaringan default NAT; pilih Bridged kalau mau diakses dari PC lain.
-3. Nyalakan. Layar console menampilkan alamat yang dibuka di browser dan password admin pertama.
+3. Nyalakan. Layar console menampilkan alamat yang dibuka di browser. Login web: `admin` / `netlab`.
 4. Login console/SSH: `root`, password pertama `netlab` (wajib diganti saat login pertama).
 
 Catatan Windows: kalau Hyper-V, WSL2, atau Docker Desktop aktif, VMware tidak bisa memberi VT-x ke VM, jadi
 VM router berjalan lambat. Router/PC container (FRR, Alpine) tidak terpengaruh.
 
-Setiap salinan yang di-import membuat password admin, SSH host key, dan machine id sendiri saat boot pertama.
+Setiap salinan yang di-import membuat SSH host key dan machine id sendiri saat boot pertama.
 Appliance tidak berisi token GitHub: untuk update online, klik nomor versi di web lalu tempel token
 (atau `netlab token` di console).
 
@@ -218,7 +229,8 @@ sama seperti NetLab sendiri.
 
 ## Login dan user
 
-Login memakai username/password, lalu server menerbitkan JWT (HS256) yang berlaku 12 jam.
+Login memakai username/password (default `admin` / `netlab`, lihat [Login default](#login-default)), lalu server
+menerbitkan JWT (HS256) yang berlaku 12 jam.
 - Password di-hash dengan PBKDF2-SHA256 dan disimpan di `data/users.json`. Kunci JWT ada di `data/jwt_secret`.
 - Ganti password lewat tombol **Change password** di UI. Semua sesi lama user itu otomatis keluar.
 - 5 kali gagal login dari IP yang sama memicu jeda 5 menit.

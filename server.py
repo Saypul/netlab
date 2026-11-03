@@ -67,7 +67,7 @@ def login(request: Request, body: dict = Body(...)):
         raise HTTPException(401, "Wrong username or password.")
     accounts.clear_fails(ip)
     token, exp = accounts.issue(username)
-    return {"token": token, "user": username, "exp": exp}
+    return {"token": token, "user": username, "exp": exp, "default_password": password == accounts.DEFAULT_PASSWORD}
 
 
 @app.get("/api/me")
@@ -520,5 +520,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("NETLAB_PORT", "8765"))
     print(f"NetLab on http://{host}:{port}/", flush=True)
     if FIRST_RUN:
-        print(f"Created user 'admin'; its password is in {accounts.INITIAL_PW_FILE}", flush=True)
+        print(f"Created user 'admin' with password '{accounts.DEFAULT_PASSWORD}'; change it after signing in", flush=True)
     uvicorn.run(app, host=host, port=port, log_level="warning")

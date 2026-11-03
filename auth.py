@@ -27,6 +27,7 @@ import engine
 USERS = engine.DATA / "users.json"
 SECRET_FILE = engine.DATA / "jwt_secret"
 INITIAL_PW_FILE = engine.DATA / "initial_password"
+DEFAULT_PASSWORD = "netlab"
 TTL = int(os.environ.get("NETLAB_JWT_TTL", 12 * 3600))
 ITERATIONS = 600_000
 MAX_FAILS, FAIL_WINDOW = 5, 300
@@ -74,6 +75,10 @@ def set_password(username, password):
         raise ValueError("username: 1-32 letters, digits, _ . -")
     if len(password) < 8:
         raise ValueError("password must be at least 8 characters")
+    _store(username, password)
+
+
+def _store(username, password):
     with _lock:
         users = _load()
         users[username] = {"hash": _hash(password), "pv": secrets.token_hex(4)}
@@ -89,12 +94,12 @@ def delete_user(username):
 
 
 def ensure_admin():
-    """First run: create 'admin' with a random password stored in data/initial_password."""
+    """First run: create 'admin' with the default password (shorter than the minimum, like EVE-NG's);
+    data/initial_password stays until it is changed."""
     if _load():
         return False
-    password = secrets.token_urlsafe(12)
-    set_password("admin", password)
-    _private_write(INITIAL_PW_FILE, f"username: admin\npassword: {password}\n")
+    _store("admin", DEFAULT_PASSWORD)
+    _private_write(INITIAL_PW_FILE, f"username: admin\npassword: {DEFAULT_PASSWORD}\n")
     return True
 
 

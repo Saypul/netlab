@@ -113,6 +113,7 @@ function login(message = "") {
         $("#login").hidden = true;
         form.onsubmit = null; pendingLogin = null;
         resolve();
+        if (j.default_password) changePassword(true);
       } catch { err.textContent = "Cannot reach the server."; }
       finally { btn.disabled = false; }
     };
@@ -125,13 +126,17 @@ function signOut() {
   location.reload();
 }
 
-async function changePassword() {
+async function changePassword(isDefault = false) {
   const cur = el("input", { type: "password", autocomplete: "current-password" });
   const nw = el("input", { type: "password", autocomplete: "new-password", minlength: 8 });
   const rep = el("input", { type: "password", autocomplete: "new-password" });
   const row = (label, input) => el("label", { class: "stack" }, label, input);
-  const ok = await modal({ title: "Change password", ok: "Change password",
-    body: el("div", {}, el("p", { text: "At least 8 characters. Other signed-in sessions for this user are signed out." }),
+  if (isDefault) cur.value = "netlab";
+  const ok = await modal({ title: "Change password", ok: "Change password", focus: isDefault ? nw : undefined,
+    body: el("div", {},
+      isDefault ? el("p", { text: "You signed in with the default password (netlab). Anyone who can reach this "
+        + "server can guess it, so set your own now." }) : "",
+      el("p", { text: "At least 8 characters. Other signed-in sessions for this user are signed out." }),
       row("Current password", cur), row("New password", nw), row("Repeat new password", rep)) });
   if (!ok) return;
   if (nw.value !== rep.value) return toast("The new passwords do not match.");
