@@ -7,7 +7,7 @@
 # install.sh, pre-pulls the router/PC container images, wipes per-machine state (users, keys, machine id)
 # and packs the disk into dist/NetLab-<version>.ova. The appliance holds no GitHub token: updates ask for
 # one in the web UI (version label in the header) or with `netlab token`.
-# Needs: KVM, qemu-system-x86_64, qemu-img, git, curl, python3, ~10 GB free disk and internet access.
+# Needs: KVM, qemu-system-x86_64, qemu-img, python3-vmdkstream, git, curl, python3, ~10 GB free disk and internet.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -178,10 +178,16 @@ grep -q NETLAB-BUILD-OK "$WORK/console.log" || { tail -n 60 "$WORK/console.log";
 
 say "Packing $OUT/$NAME.ova"
 rm -rf "$WORK/ova" && mkdir "$WORK/ova"
-qemu-img convert -O vmdk -o subformat=streamOptimized,adapter_type=lsilogic "$WORK/disk.qcow2" "$WORK/ova/$NAME-disk1.vmdk"
+# qemu-img's streamOptimized VMDK has no footer or end-of-stream marker, and VMware's OVA import then
+# reports "SHA digest ... does not match manifest"; VMDKstream (Ubuntu's OVAs) follows VMware's layout.
+python3 -c 'import VMDKstream' 2>/dev/null || apt-get install -y -q python3-vmdkstream
+qemu-img convert -O raw "$WORK/disk.qcow2" "$WORK/disk.raw"  # sparse
 rm -f "$WORK/disk.qcow2"
+used=$(du -B1 "$WORK/disk.raw" | cut -f1)
+python3 -c 'import sys, VMDKstream; VMDKstream.convert_to_stream(*sys.argv[1:])' "$WORK/disk.raw" "$WORK/ova/$NAME-disk1.vmdk"
+qemu-img compare -q -f raw -F vmdk "$WORK/disk.raw" "$WORK/ova/$NAME-disk1.vmdk"
+rm -f "$WORK/disk.raw"
 vmdk_size=$(stat -c %s "$WORK/ova/$NAME-disk1.vmdk")
-used=$(qemu-img info --output=json "$WORK/ova/$NAME-disk1.vmdk" | python3 -c 'import json,sys; print(json.load(sys.stdin)["actual-size"])')
 sed -e "s/@NAME@/$NAME/g; s/@VERSION@/$VERSION/g; s/@VMDK_SIZE@/$vmdk_size/; s/@USED@/$used/" \
     -e "s/@DISK_GB@/$DISK_GB/; s/@CPUS@/$VM_CPUS/g; s/@RAM@/$VM_RAM/g" appliance/netlab.ovf > "$WORK/ova/$NAME.ovf"
 (cd "$WORK/ova" && for f in "$NAME.ovf" "$NAME-disk1.vmdk"; do echo "SHA256($f)= $(sha256sum "$f" | cut -d' ' -f1)"; done > "$NAME.mf")
