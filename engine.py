@@ -80,6 +80,7 @@ QEMU_CATALOG = {
     "windows": {"label": "Windows", "category": "host", "nic": "e1000", "disk_if": "ide", "cpu": 2,
                 "ram": 4096, "ifaces": 1},
 }
+ADMIN = "admin"  # sees and manages every user's labs
 NAME_PREFIX = {"router": "R", "switch": "SW", "firewall": "FW", "host": "PC", "other": "VM"}
 RAM_RESERVE_MB = int(os.environ.get("NETLAB_RAM_RESERVE_MB", 256))
 
@@ -178,17 +179,30 @@ def save(lab):
     tmp.replace(p)
 
 
-def list_labs():
+def owner(lab):
+    return lab.get("owner") or ADMIN  # labs from before per-user labs belong to admin
+
+
+def can_access(lab_id, user):
+    """Each user sees only their own labs; admin sees every lab. Another user's lab looks missing."""
+    lab = load(lab_id)
+    if user != ADMIN and owner(lab) != user:
+        raise LabError("lab not found")
+    return lab
+
+
+def list_labs(user):
     out = []
     for p in sorted(LABS.glob("*.json")):
         lab = json.loads(p.read_text())
-        out.append({"id": lab["id"], "name": lab["name"], "nodes": len(lab["nodes"])})
+        if user == ADMIN or owner(lab) == user:
+            out.append({"id": lab["id"], "name": lab["name"], "nodes": len(lab["nodes"]), "owner": owner(lab)})
     return out
 
 
-def create_lab(name, data=None):
+def create_lab(name, data=None, user=ADMIN):
     with _file_lock:
-        lab = {"id": uuid.uuid4().hex[:8], "name": name or "New lab", "seq": 0,
+        lab = {"id": uuid.uuid4().hex[:8], "name": name or "New lab", "owner": user, "seq": 0,
                "nodes": {}, "networks": {}, "links": {}}
         if data:  # import
             for k in ("seq", "nodes", "networks", "links"):
@@ -1110,8 +1124,8 @@ def console_target(lab_id, node_id, kind):
 
 # ---------------------------------------------------------------- demo lab
 
-def create_demo_lab():
-    lab = create_lab("Demo OSPF")
+def create_demo_lab(user=ADMIN):
+    lab = create_lab("Demo OSPF", user=user)
     lid = lab["id"]
 
     def r(name, x, y, rid, ifs):

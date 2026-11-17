@@ -56,6 +56,23 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 api = Depends(auth)
 
 
+def lab_auth(lab_id: str, user: str = api):
+    engine.can_access(lab_id, user)
+    return user
+
+
+lab_api = Depends(lab_auth)  # routes on one lab: only its owner (or admin) may use them
+
+
+def admin_auth(user: str = api):
+    if user != engine.ADMIN:  # restarts the server under every user's sessions
+        raise HTTPException(403, "only admin can do this")
+    return user
+
+
+admin_api = Depends(admin_auth)
+
+
 @app.post("/api/login")
 def login(request: Request, body: dict = Body(...)):
     ip = request.client.host if request.client else "?"
@@ -156,7 +173,7 @@ def update_status():  # no sign-in: the page polls it while the server restarts,
     return {"version": updater.version(), **updater.status()}
 
 
-@app.post("/api/update", dependencies=[api])
+@app.post("/api/update", dependencies=[admin_api])
 def update_start(body: dict = Body(default={})):
     try:
         updater.start_background(body.get("version"))
@@ -165,7 +182,7 @@ def update_start(body: dict = Body(default={})):
     return {"ok": True}
 
 
-@app.put("/api/update/token", dependencies=[api])
+@app.put("/api/update/token", dependencies=[admin_api])
 async def update_token(body: dict = Body(...)):
     token = str(body.get("token", "")).strip()
     if not re.fullmatch(r"[A-Za-z0-9_]{20,255}", token):
@@ -174,24 +191,36 @@ async def update_token(body: dict = Body(...)):
     return await update_info(force=1)
 
 
-@app.get("/api/ai", dependencies=[api])
-def ai_providers():
-    return {"providers": ai.providers()}
+@app.get("/api/ai")
+def ai_providers(user: str = api):
+    return {"providers": ai.providers(user)}
 
 
-@app.get("/api/labs", dependencies=[api])
-def labs():
-    return engine.list_labs()
+@app.put("/api/ai/9router")
+def ai_router_connect(body: dict = Body(...), user: str = api):
+    ai.set_router_config(user, body.get("url"), body.get("key"), body.get("model"))
+    return {"providers": ai.providers(user)}
 
 
-@app.post("/api/labs", dependencies=[api])
-def create_lab(body: dict = Body(...)):
+@app.delete("/api/ai/9router")
+def ai_router_disconnect(user: str = api):
+    ai.clear_router_config(user)
+    return {"providers": ai.providers(user)}
+
+
+@app.get("/api/labs")
+def labs(user: str = api):
+    return engine.list_labs(user)
+
+
+@app.post("/api/labs")
+def create_lab(body: dict = Body(...), user: str = api):
     if body.get("demo"):
-        return engine.create_demo_lab()
-    return engine.create_lab(body.get("name"), body.get("import"))
+        return engine.create_demo_lab(user)
+    return engine.create_lab(body.get("name"), body.get("import"), user)
 
 
-@app.get("/api/labs/{lab_id}", dependencies=[api])
+@app.get("/api/labs/{lab_id}", dependencies=[lab_api])
 def get_lab(lab_id: str):
     lab = engine.load(lab_id)
     lab["status"] = engine.lab_status(lab_id)
@@ -200,12 +229,12 @@ def get_lab(lab_id: str):
     return lab
 
 
-@app.patch("/api/labs/{lab_id}", dependencies=[api])
+@app.patch("/api/labs/{lab_id}", dependencies=[lab_api])
 def update_lab(lab_id: str, body: dict = Body(...)):
     return engine.update_lab(lab_id, body)
 
 
-@app.delete("/api/labs/{lab_id}", dependencies=[api])
+@app.delete("/api/labs/{lab_id}", dependencies=[lab_api])
 def delete_lab(lab_id: str):
     engine.delete_lab(lab_id)
     return {"ok": True}
@@ -232,51 +261,51 @@ def _ai_mark(lab_id, node_id, active, log=None):
         rec["log"] = log[-8192:]
 
 
-@app.get("/api/labs/{lab_id}/status", dependencies=[api])
+@app.get("/api/labs/{lab_id}/status", dependencies=[lab_api])
 def status(lab_id: str):
     return {"nodes": engine.lab_status(lab_id), "links": engine.link_status(lab_id),
             "ai": AI_ACTIVITY.get(lab_id, {})}
 
 
-@app.post("/api/labs/{lab_id}/start", dependencies=[api])
+@app.post("/api/labs/{lab_id}/start", dependencies=[lab_api])
 def start_lab(lab_id: str):
     return {"errors": engine.start_lab(lab_id)}
 
 
-@app.post("/api/labs/{lab_id}/stop", dependencies=[api])
+@app.post("/api/labs/{lab_id}/stop", dependencies=[lab_api])
 def stop_lab(lab_id: str):
     engine.stop_lab(lab_id)
     return {"ok": True}
 
 
-@app.post("/api/labs/{lab_id}/nodes", dependencies=[api])
+@app.post("/api/labs/{lab_id}/nodes", dependencies=[lab_api])
 def add_node(lab_id: str, body: dict = Body(...)):
     return engine.add_node(lab_id, body)
 
 
-@app.patch("/api/labs/{lab_id}/nodes/{node_id}", dependencies=[api])
+@app.patch("/api/labs/{lab_id}/nodes/{node_id}", dependencies=[lab_api])
 def update_node(lab_id: str, node_id: str, body: dict = Body(...)):
     return engine.update_node(lab_id, node_id, body)
 
 
-@app.delete("/api/labs/{lab_id}/nodes/{node_id}", dependencies=[api])
+@app.delete("/api/labs/{lab_id}/nodes/{node_id}", dependencies=[lab_api])
 def delete_node(lab_id: str, node_id: str):
     engine.delete_node(lab_id, node_id)
     return {"ok": True}
 
 
-@app.get("/api/labs/{lab_id}/nodes/{node_id}/config", dependencies=[api])
+@app.get("/api/labs/{lab_id}/nodes/{node_id}/config", dependencies=[lab_api])
 def get_config(lab_id: str, node_id: str):
     return {"text": engine.get_config(lab_id, node_id)}
 
 
-@app.put("/api/labs/{lab_id}/nodes/{node_id}/config", dependencies=[api])
+@app.put("/api/labs/{lab_id}/nodes/{node_id}/config", dependencies=[lab_api])
 def set_config(lab_id: str, node_id: str, body: dict = Body(...)):
     engine.set_config(lab_id, node_id, str(body.get("text", "")))
     return {"ok": True}
 
 
-@app.post("/api/labs/{lab_id}/nodes/{node_id}/exec", dependencies=[api])
+@app.post("/api/labs/{lab_id}/nodes/{node_id}/exec", dependencies=[lab_api])
 async def node_exec(lab_id: str, node_id: str, body: dict = Body(...)):
     lines = body.get("lines")
     if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
@@ -294,7 +323,7 @@ async def node_exec(lab_id: str, node_id: str, body: dict = Body(...)):
         return r
 
 
-@app.post("/api/labs/{lab_id}/nodes/{node_id}/{action}", dependencies=[api])
+@app.post("/api/labs/{lab_id}/nodes/{node_id}/{action}", dependencies=[lab_api])
 def node_action(lab_id: str, node_id: str, action: str):
     fn = {"start": engine.start_node, "stop": engine.stop_node, "wipe": engine.wipe_node}.get(action)
     if not fn:
@@ -303,28 +332,28 @@ def node_action(lab_id: str, node_id: str, action: str):
     return {"ok": True}
 
 
-@app.post("/api/labs/{lab_id}/networks", dependencies=[api])
+@app.post("/api/labs/{lab_id}/networks", dependencies=[lab_api])
 def add_network(lab_id: str, body: dict = Body(...)):
     return engine.add_network(lab_id, body)
 
 
-@app.patch("/api/labs/{lab_id}/networks/{net_id}", dependencies=[api])
+@app.patch("/api/labs/{lab_id}/networks/{net_id}", dependencies=[lab_api])
 def update_network(lab_id: str, net_id: str, body: dict = Body(...)):
     return engine.update_network(lab_id, net_id, body)
 
 
-@app.delete("/api/labs/{lab_id}/networks/{net_id}", dependencies=[api])
+@app.delete("/api/labs/{lab_id}/networks/{net_id}", dependencies=[lab_api])
 def delete_network(lab_id: str, net_id: str):
     engine.delete_network(lab_id, net_id)
     return {"ok": True}
 
 
-@app.post("/api/labs/{lab_id}/links", dependencies=[api])
+@app.post("/api/labs/{lab_id}/links", dependencies=[lab_api])
 def add_link(lab_id: str, body: dict = Body(...)):
     return engine.add_link(lab_id, body)
 
 
-@app.delete("/api/labs/{lab_id}/links/{link_id}", dependencies=[api])
+@app.delete("/api/labs/{lab_id}/links/{link_id}", dependencies=[lab_api])
 def delete_link(lab_id: str, link_id: str):
     engine.delete_link(lab_id, link_id)
     return {"ok": True}
@@ -338,10 +367,12 @@ def delete_link(lab_id: str, link_id: str):
 async def console(ws: WebSocket, lab_id: str, node_id: str, token: str = "", kind: str = "", history: int = 1,
                   ai: int = 0):
     await ws.accept()  # accept first so the browser sees close code 4401, not a bare handshake failure
-    if not accounts.verify(token):
+    user = accounts.verify(token)
+    if not user:
         await ws.close(code=4401)
         return
     try:
+        await asyncio.to_thread(engine.can_access, lab_id, user)
         mode, target = await asyncio.to_thread(engine.console_target, lab_id, node_id, kind)
     except engine.LabError as e:
         await ws.send_bytes(f"\r\n*** {e} ***\r\n".encode())

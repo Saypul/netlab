@@ -198,7 +198,7 @@ Kalau server tidak bisa diakses, buka console lalu jalankan (dari folder NetLab)
     cp host-network/01-netcfg.yaml.orig /etc/netplan/01-netcfg.yaml
     netplan apply && ip link del pnet0
 
-## AI assistant (Claude Code, Codex, OpenCode)
+## AI assistant (Claude Code, Codex, OpenCode, 9Router)
 
 Tombol **AI assistant** di kanan atas membuka panel AI di sisi kanan, menggantikan panel Lab selama terbuka.
 Pilih asistennya, lalu klik **Start on <lab>**. Asisten bekerja pada lab yang sedang dibuka, sedangkan console router
@@ -209,9 +209,14 @@ tetap di bawah. Lebar panel bisa diubah dengan menyeret tepi kirinya.
   keamanan ChatGPT.
 - **OpenCode** (open source): bisa langsung dipakai dengan model gratis. Ketik `/connect` atau klik **Sign in**
   untuk memakai Claude, ChatGPT, GitHub Copilot, dan provider lain.
+- **9Router (Claude Code)**: Claude Code lewat proxy [9Router](https://github.com/decolua/9router), jadi bisa
+  memakai provider/combo apa pun yang terhubung di dashboard 9Router. Klik **Connect**, isi URL 9Router
+  (default `http://127.0.0.1:20128`, bisa diganti dengan `NETLAB_9ROUTER_URL`), API key dari dashboard 9Router,
+  dan nama model atau combo (mis. `cc/claude-sonnet-4-5`). NetLab mengecek key-nya saat Connect.
 
-Login disimpan di `data/ai/home/<provider>`, terpisah dari login Claude/Codex lain yang ada di server, dan
-dipakai bersama oleh semua user NetLab. Asisten mengakses lab lewat `nlctl`, yang bisa:
+Login disimpan per user NetLab di `data/ai/users/<user>/<provider>` (9Router: `data/ai/users/<user>/9router.json`),
+terpisah dari login Claude/Codex lain yang ada di server. Setiap user login dengan akunnya sendiri dan tidak
+melihat akun atau riwayat sesi user lain. Login lama di `data/ai/home/<provider>` otomatis dipindah ke user `admin`. Asisten mengakses lab lewat `nlctl`, yang bisa:
 - membaca topologi (`nlctl lab`);
 - menjalankan perintah di node (`nlctl run R1 "show ip route"`): vtysh/shell untuk container, serial console untuk VM;
 - menjalankan atau mematikan node.
@@ -227,6 +232,15 @@ menampilkan perintah dan output-nya. Asisten mengakses node satu per satu: perin
 perintah sebelumnya selesai. Setiap asisten butuh RAM bebas sekitar 400 MB (`NETLAB_AI_MIN_RAM_MB`). Asisten berjalan sebagai root di server,
 sama seperti NetLab sendiri.
 
+### Menjalankan 9Router di server
+
+    npm install -g 9router @anthropic-ai/claude-code
+    sudo NETLAB_DIR=/root/netlab NETLAB_9ROUTER=1 ./install.sh    # atau jalankan `9router` sendiri
+
+`NETLAB_9ROUTER=1` memasang service `9router` (port 20128, data di `/var/lib/9router`, password dashboard
+pertama di `data/9router_initial_password`). Buka `http://<server>:20128/dashboard`, ganti password-nya,
+hubungkan provider, lalu buat API key untuk tiap user NetLab.
+
 ## Login dan user
 
 Login memakai username/password (default `admin` / `netlab`, lihat [Login default](#login-default)), lalu server
@@ -234,6 +248,15 @@ menerbitkan JWT (HS256) yang berlaku 12 jam.
 - Password di-hash dengan PBKDF2-SHA256 dan disimpan di `data/users.json`. Kunci JWT ada di `data/jwt_secret`.
 - Ganti password lewat tombol **Change password** di UI. Semua sesi lama user itu otomatis keluar.
 - 5 kali gagal login dari IP yang sama memicu jeda 5 menit.
+
+### Multi user: lab terpisah per user
+
+Setiap lab punya pemilik (user yang membuatnya). Daftar lab hanya menampilkan lab milik user itu sendiri, dan
+semua API serta console lab lain ditolak ("lab not found"), termasuk lewat `nlctl` asisten AI. Jadi dua user yang
+membuat lab bersamaan tidak saling melihat atau mengubah lab, node, console, dan sesi AI masing-masing.
+User `admin` melihat semua lab (nama pemiliknya ditampilkan di daftar lab); lab lama tanpa pemilik menjadi
+milik `admin`. Update server hanya bisa dilakukan `admin`, karena me-restart server untuk semua user.
+Image QEMU tetap dipakai bersama, dan image yang masih dipakai lab mana pun tidak bisa dihapus.
 
 Kelola user dari server:
 

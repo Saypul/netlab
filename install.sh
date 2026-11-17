@@ -7,7 +7,8 @@
 # From a checkout:   sudo ./install.sh
 #
 # Env: NETLAB_DIR (default /opt/netlab), NETLAB_PORT (8765), NETLAB_REPO (Saypul/netlab),
-#      NETLAB_GITHUB_TOKEN, NETLAB_REF (a tag or branch; default: the newest release tag, else main)
+#      NETLAB_GITHUB_TOKEN, NETLAB_REF (a tag or branch; default: the newest release tag, else main),
+#      NETLAB_9ROUTER=1 (also run the 9Router AI proxy as a service on port 20128; needs Node.js 20.18+)
 set -euo pipefail
 
 DIR=${NETLAB_DIR:-/opt/netlab}
@@ -84,6 +85,34 @@ systemctl daemon-reload
 systemctl enable -q netlab
 systemctl restart netlab
 
+if [ "${NETLAB_9ROUTER:-0}" = 1 ]; then
+  say "9Router (AI assistant proxy)"
+  command -v npm >/dev/null || die "9Router needs Node.js 20.18+ and npm"
+  npm install -g -q 9router @anthropic-ai/claude-code
+  pw_file="$DIR/data/9router_initial_password"
+  [ -f "$pw_file" ] || { install -m 600 /dev/null "$pw_file"; head -c 18 /dev/urandom | base64 | tr -d '+/=' > "$pw_file"; }
+  install -m 600 /dev/null /etc/default/9router
+  printf 'PORT=20128\nHOSTNAME=0.0.0.0\nDATA_DIR=/var/lib/9router\nINITIAL_PASSWORD=%s\n' "$(cat "$pw_file")" > /etc/default/9router
+  app=$(npm root -g)/9router/app
+  cat > /etc/systemd/system/9router.service <<EOF
+[Unit]
+Description=9Router AI proxy for the NetLab AI assistant
+After=network.target
+
+[Service]
+WorkingDirectory=$app
+ExecStart=$(command -v node) $app/custom-server.js
+EnvironmentFile=/etc/default/9router
+StateDirectory=9router
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable -q --now 9router
+fi
+
 say "Starting"
 for _ in $(seq 30); do
   curl -fs -o /dev/null "http://127.0.0.1:$PORT/" && break
@@ -98,4 +127,7 @@ if [ -f "$DIR/data/initial_password" ]; then
   echo "First sign-in: user admin, password netlab (you are asked to change it)"
 fi
 [ -e /dev/kvm ] || echo "note: /dev/kvm is missing, so VMs run without hardware acceleration (slow)"
+if [ -f "$DIR/data/9router_initial_password" ]; then
+  echo "9Router dashboard: http://${ip:-<server>}:20128/dashboard (first password in $DIR/data/9router_initial_password)"
+fi
 echo "Manage it with: netlab update | netlab status | netlab logs | netlab user passwd <user>"

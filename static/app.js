@@ -168,9 +168,33 @@ function aiCurrent() {
     || ai.sessions.find((c) => c.provider === ai.pick && c.mode === "chat" && c.lab === state.lab?.id);
 }
 
+// 9Router: Claude Code through a 9Router proxy; "signing in" stores this user's API key and model
+async function aiRouterConnect() {
+  const p = ai.providers?.find((x) => x.key === "9router");
+  const url = el("input", { type: "url", value: p?.url || "http://127.0.0.1:20128" });
+  const key = el("input", { type: "password", autocomplete: "off", placeholder: "from 9Router dashboard → Endpoint" });
+  const model = el("input", { type: "text", value: p?.model || "", placeholder: "e.g. cc/claude-sonnet-4-5 or a combo name" });
+  const row = (label, input) => el("label", { class: "stack" }, label, input);
+  const ok = await modal({ title: "Connect 9Router", ok: "Connect", focus: key,
+    body: el("div", {},
+      el("p", { text: "Connect providers and create an API key in the 9Router dashboard (port 20128), then enter "
+        + "them here. The key and model are yours only; other NetLab users connect their own." }),
+      row("9Router URL", url), row("API key", key), row("Model or combo", model)) });
+  if (!ok) return;
+  ai.providers = (await api("PUT", "/ai/9router", { url: url.value, key: key.value, model: model.value })).providers;
+  toast("9Router connected.");
+  renderAI();
+}
+
+async function aiRouterDisconnect() {
+  ai.providers = (await api("DELETE", "/ai/9router")).providers;
+  renderAI();
+}
+
 function aiStart(mode) {
   const p = ai.providers?.find((x) => x.key === ai.pick);
   if (!p) return;
+  if (p.key === "9router" && mode !== "chat") return mode === "login" ? aiRouterConnect() : aiRouterDisconnect();
   if (mode === "chat" && !state.lab) return toast("Open a lab first.");
   ai.sessions.filter((c) => c.provider === p.key && c.mode !== "chat").forEach(aiDispose);
   const url = mode === "chat" ? `/ws/ai/${p.key}?mode=chat&lab=${state.lab.id}` : `/ws/ai/${p.key}?mode=${mode}`;
@@ -201,6 +225,7 @@ function renderAI() {
     return el("option", { value: x.key, text: x.label + (running ? " (running)" : ""), selected: x.key === ai.pick });
   }));
   $("#aiStatus").textContent = !p ? "Checking sign-in…" : !p.installed ? "Not installed"
+    : p.key === "9router" ? (p.signed_in ? `Connected · ${p.model}` : "Not connected")
     : p.signed_in ? "Signed in" : p.key === "opencode" ? "Free models" : "Not signed in";
 
   const cur = aiCurrent();
@@ -209,7 +234,9 @@ function renderAI() {
   const acts = [];
   if (cur && cur.mode !== "chat") acts.push(btn(live(cur) ? "Cancel" : "Done", () => aiDispose(cur)));
   else {
-    acts.push(p?.signed_in ? btn("Sign out", () => aiStart("logout")) : btn("Sign in", () => aiStart("login")));
+    const [inText, outText] = p?.key === "9router" ? ["Connect", "Disconnect"] : ["Sign in", "Sign out"];
+    acts.push(p?.signed_in ? btn(outText, () => aiStart("logout")) : btn(inText, () => aiStart("login")));
+    if (p?.key === "9router" && p.signed_in) acts.unshift(btn("Change", aiRouterConnect));
     if (cur) acts.push(btn("Restart", () => { aiDispose(cur); aiStart("chat"); }), btn("Stop", () => aiDispose(cur)));
   }
   $("#aiActions").replaceChildren(...acts);
@@ -224,8 +251,8 @@ function renderAI() {
       p && !p.installed ? el("p", {}, "Install it on the server: ", el("code", { text: p.install })) : start,
       el("p", { class: "note", text: "The assistant works on the open lab: it reads the topology, runs commands on the "
         + "nodes and can start or stop them. It asks before running commands unless you allow it." }),
-      el("p", { class: "note", text: "Sign-in is stored on the NetLab server and shared by every NetLab user. "
-        + "Each running assistant needs about 400 MB of free RAM." }));
+      el("p", { class: "note", text: "Sign-in is stored on the NetLab server per NetLab user: other users "
+        + "do not see your account or your sessions. Each running assistant needs about 400 MB of free RAM." }));
   } else requestAnimationFrame(() => cur.fit.fit());
 }
 
@@ -441,7 +468,10 @@ async function loadLabs(selectId) {
   state.labs = await api("GET", "/labs");
   const sel = $("#labSelect");
   sel.innerHTML = "";
-  for (const l of state.labs) sel.append(el("option", { value: l.id, text: `${l.name}  (${l.nodes})` }));
+  for (const l of state.labs) {  // admin sees every user's labs: mark the ones that are not theirs
+    const who = l.owner && l.owner !== state.user ? `  · ${l.owner}` : "";
+    sel.append(el("option", { value: l.id, text: `${l.name}  (${l.nodes})${who}` }));
+  }
   const id = selectId || store.get("netlab.lab");
   const pick = state.labs.find((l) => l.id === id) || state.labs[0];
   if (pick) { sel.value = pick.id; await openLab(pick.id); }
